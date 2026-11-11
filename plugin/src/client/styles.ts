@@ -223,6 +223,17 @@ const CSS = `
   to { transform: rotate(360deg); }
 }
 
+/* Conversation running marker: ring spinner (idle conversations show nothing, like stock DSH) */
+.owt-loading {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  flex: none;
+  border: 1.5px solid color-mix(in srgb, var(--dsw-alias-brand-primary) 30%, transparent);
+  border-top-color: var(--dsw-alias-brand-primary);
+  animation: owt-spin 0.8s linear infinite;
+}
+
 .owt-wt-branch {
   flex: 1;
   min-width: 0;

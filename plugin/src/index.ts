@@ -546,18 +546,33 @@ export default class WorktreeManagerService extends TypertRemoteService {
     }
 
     const branch = await this.branchOf(policy, canonical, signal)
-    const dirty = await this.dirtyCountOf(policy, canonical, signal)
-    if (dirty > 0 && !force) {
-      throw new WorktreeError('WORKTREE_DIRTY', `${canonical} has ${dirty} uncommitted change(s); pass force to discard them`)
-    }
-
     const registry = await this.registry(root)
     const children = registry.worktrees.filter(item => item.parentPath === canonical)
+    // Physical children block removal too: force-removing a parent would delete
+    // nested checkouts created outside the plugin registry.
+    const listedAll = await this.gitRunner(policy, signal, COMMAND_TIMEOUT_MS)(root, ['worktree', 'list', '--porcelain', '-z'], [0, 128])
+    for (const block of listedAll.stdout.split('\0\0')) {
+      const raw = block.split('\0').find(field => field.startsWith('worktree '))?.slice('worktree '.length)
+      if (raw === undefined || raw.length === 0) continue
+      let target
+      try {
+        target = await this.fs().resolve(raw, { signal })
+      } catch {
+        continue
+      }
+      const nested = this.fs().processPath(target)
+      if (nested !== canonical && nested.startsWith(`${canonical}/`)) children.push({ path: nested, branch: '' })
+    }
     if (children.length > 0 && !force) {
       throw new WorktreeError(
         'WORKTREE_HAS_CHILDREN',
         `${canonical} has ${children.length} child worktree(s); pass force to detach them`,
       )
+    }
+
+    const dirty = await this.dirtyCountOf(policy, canonical, signal)
+    if (dirty > 0 && !force) {
+      throw new WorktreeError('WORKTREE_DIRTY', `${canonical} has ${dirty} uncommitted change(s); pass force to discard them`)
     }
 
     const removeRun = this.gitRunner(policy, signal, REMOVE_TIMEOUT_MS)
@@ -1012,6 +1027,19 @@ export default class WorktreeManagerService extends TypertRemoteService {
       parsedBlocks.push({ canonicalPath, branch, isMain, isManaged })
     }
 
+    // Lineage fallback: a worktree nested inside another worktree (registry entry
+    // absent, e.g. created by the native DSH tool) is its physical child.
+    const derivedParentOf = new Map<string, string>()
+    for (const block of parsedBlocks) {
+      let best: string | undefined
+      for (const other of parsedBlocks) {
+        if (other.canonicalPath === block.canonicalPath) continue
+        if (!block.canonicalPath.startsWith(`${other.canonicalPath}/`)) continue
+        if (best === undefined || other.canonicalPath.length > best.length) best = other.canonicalPath
+      }
+      if (best !== undefined) derivedParentOf.set(block.canonicalPath, best)
+    }
+
     const rows = await Promise.all(
       parsedBlocks.map(async ({ canonicalPath, branch, isMain, isManaged }): Promise<WorktreeRow> => {
         const entry = registry.worktrees.find(item => item.path === canonicalPath)
@@ -1026,7 +1054,7 @@ export default class WorktreeManagerService extends TypertRemoteService {
           dirtyCount,
           pinned,
           displayName: entry?.displayName,
-          parentPath: entry?.parentPath,
+          parentPath: entry?.parentPath ?? derivedParentOf.get(canonicalPath),
           createdAt: entry?.createdAt,
           workspaceId: linkedWs?.id,
           ...(currentCwd !== undefined
