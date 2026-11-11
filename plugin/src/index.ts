@@ -61,13 +61,18 @@ const MAX_OUTPUT_BYTES = 1 << 20
 const PREPARE_POOL_SCRIPT = `
 import fs from 'node:fs/promises';
 import path from 'node:path';
-const [pool, dest] = process.argv.slice(1);
+const [pool, dest, content] = process.argv.slice(1);
 await fs.mkdir(path.dirname(pool), { recursive: true });
 let created = false;
 try { await fs.mkdir(pool); created = true; }
 catch (e) { if (e.code !== 'EEXIST' || !(await fs.stat(pool)).isDirectory()) throw e; }
 if (created) await fs.writeFile(path.join(pool, '.gitignore'), '*\\n', { flag: 'wx' }).catch(() => {});
-await fs.mkdir(path.dirname(dest), { recursive: true });
+if (content !== undefined) {
+  // Atomic tmp+rename so a crash never leaves a torn registry JSON behind.
+  const tmp = dest + '.tmp';
+  await fs.writeFile(tmp, content);
+  await fs.rename(tmp, dest);
+}
 `
 
 interface AgentLike {
@@ -795,17 +800,15 @@ export default class WorktreeManagerService extends TypertRemoteService {
       worktrees: current.worktrees.map(item => ({ ...item })),
     })
     const filePath = this.registryPath(root)
-    const dirPath = pathDirname(filePath)
-    // Ensure `.agents/worktrees` exists with self-ignoring `.gitignore` before writing registry JSON.
+    // Written via the full-access helper script: `.agents/` is harness-managed and
+    // rejected by `fs().writeText` under workspace-write sandbox policies.
     await this.runArgv(
       { mode: 'danger-full-access' },
       root,
-      ['node', '--input-type=module', '-e', PREPARE_POOL_SCRIPT, dirPath, filePath],
+      ['node', '--input-type=module', '-e', PREPARE_POOL_SCRIPT, pathDirname(filePath), filePath, `${JSON.stringify(next, null, 2)}\n`],
       COMMAND_TIMEOUT_MS,
       undefined,
     )
-    const target = await this.fs().resolve(filePath, { signal: undefined })
-    await this.fs().writeText(target, `${JSON.stringify(next, null, 2)}\n`)
   }
 
   // ---------------------------------------------------------------------
