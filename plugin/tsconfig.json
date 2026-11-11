@@ -11,13 +11,7 @@
     "verbatimModuleSyntax": true,
     "isolatedModules": true,
     "skipLibCheck": true,
-    "types": [],
-    // Types from the dev checkout; at runtime the bare specifiers resolve to
-    // the vendored copies of the packaged app's own modules (see package.json).
-    "paths": {
-      "@deepseek-ai/cordis": ["../../deepseek-harness/vendor/cordis/lib/types/index.d.ts"],
-      "@deepseek-ai/dsh-typert-protocol": ["../../deepseek-harness/packages/typert/protocol/lib/types/index.d.ts"]
-    }
+    "types": []
   },
   "include": ["src"]
 }

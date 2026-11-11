@@ -256,6 +256,20 @@ const CSS = `
   border: 1px solid var(--dsw-alias-border-l1);
 }
 
+.owt-missing-pill {
+  flex: none;
+  font-size: 10.5px;
+  line-height: 15px;
+  padding: 0 5px;
+  border-radius: 999px;
+  color: var(--dsw-alias-state-warn-primary);
+  border: 1px solid color-mix(in srgb, var(--dsw-alias-state-warn-primary) 45%, transparent);
+}
+
+.owt-repo-row[data-missing="true"] .owt-repo-name {
+  opacity: 0.65;
+}
+
 /* Chat count / expand pill when a worktree hosts conversations */
 .owt-chat-pill {
   display: inline-flex;
@@ -464,6 +478,10 @@ const CSS = `
   line-height: 1.45;
 }
 
+.owt-modal-desc[data-kind="danger"] {
+  color: var(--dsw-alias-state-error-primary);
+}
+
 .owt-input {
   width: 100%;
   box-sizing: border-box;
@@ -592,6 +610,246 @@ const CSS = `
 
 .owt-btn[data-kind="danger"] {
   color: var(--dsw-alias-state-error-primary);
+}
+
+.owt-btn-xs {
+  height: 25px;
+  padding: 0 9px;
+  font-size: 11.5px;
+  border-radius: 6px;
+}
+
+/* Settings -> Archived Sessions section */
+.owt-arch-root {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: 100%;
+  color: var(--dsw-alias-label-primary);
+  font-size: 13px;
+}
+
+.owt-arch-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.owt-arch-title-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.owt-arch-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 22px;
+}
+
+.owt-arch-count {
+  font-size: 11.5px;
+  font-weight: 500;
+  line-height: 18px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-secondary);
+}
+
+.owt-arch-desc {
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.owt-arch-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  background: var(--dsw-alias-bg-layer-1);
+}
+
+.owt-arch-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 12.5px;
+}
+
+.owt-arch-search input::placeholder {
+  color: var(--dsw-alias-label-secondary);
+}
+
+.owt-arch-empty {
+  padding: 36px 16px;
+  text-align: center;
+  border-radius: 12px;
+  border: 1px dashed var(--dsw-alias-border-l1);
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12.5px;
+}
+
+.owt-arch-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.owt-arch-card {
+  border-radius: 12px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  background: var(--dsw-alias-bg-layer-1);
+  overflow: hidden;
+}
+
+.owt-arch-repo-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.owt-arch-repo-head:hover {
+  background: var(--dsw-alias-bg-layer-2);
+}
+
+.owt-arch-repo-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 13.5px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.owt-arch-branches {
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--dsw-alias-border-l1);
+  padding: 6px 10px 10px;
+  gap: 6px;
+}
+
+.owt-arch-branch-group {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.owt-arch-branch-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 7px;
+}
+
+.owt-arch-branch-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+  cursor: pointer;
+  color: var(--dsw-alias-label-primary);
+}
+
+.owt-arch-branch-name {
+  font-size: 12.5px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.owt-arch-link-btn {
+  border: 0;
+  background: transparent;
+  padding: 2px 6px;
+  border-radius: 5px;
+  font: inherit;
+  font-size: 11.5px;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+  flex: none;
+}
+
+.owt-arch-link-btn:hover:not(:disabled) {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-layer-2);
+}
+
+.owt-arch-sessions {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.owt-arch-sessions[data-indented="true"] {
+  margin-left: 18px;
+  padding-left: 10px;
+  border-left: 1px solid var(--dsw-alias-border-l1);
+}
+
+.owt-arch-session-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 4px 8px;
+  border-radius: 8px;
+}
+
+.owt-arch-session-row:hover {
+  background: var(--dsw-alias-bg-layer-2);
+}
+
+.owt-arch-session-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.owt-arch-session-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.owt-arch-session-time {
+  flex: none;
+  font-size: 11px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.owt-arch-session-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
 }
 `
 

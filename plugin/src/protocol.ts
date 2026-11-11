@@ -36,6 +36,8 @@ export interface WorktreeRow {
   readonly createdAt?: string
   /** Registered DSH Workspace id owning conversations in this checkout, when present. */
   readonly workspaceId?: string
+  /** Upstream ref like `origin/feat-x` when the branch is pushed, enabling remote-branch cleanup on remove. */
+  readonly upstream?: string
   /** True when calling from an agent tool whose session cwd sits inside this checkout. */
   readonly current?: boolean
 }
@@ -55,6 +57,8 @@ export interface WorktreeOverviewValue {
   readonly repos: readonly WorktreeRepoGroup[]
   /** Canonical paths of registered Workspaces that belong to one of `repos` (main or worktree). */
   readonly claimedPaths: readonly string[]
+  /** Registered Workspace paths that no longer exist on disk. */
+  readonly missingPaths?: readonly string[]
 }
 
 /** Single-repository list outcome (used by agent tools). */
@@ -105,8 +109,36 @@ export interface WorktreeStatusValue {
 /** `remove` outcome. */
 export interface WorktreeRemoveValue {
   readonly path: string
-  readonly branchPreserved: boolean
+  readonly branchDeleted: boolean
+  /** True when the branch had unmerged commits and was force-deleted. */
+  readonly branchHadUnmerged: boolean
+  /** Number of conversations inside this worktree automatically archived via DSH `workspaceRegistry`. */
+  readonly archivedCount?: number
+  /** Set when remote-branch deletion was requested. */
+  readonly remoteDeleted?: boolean
+  readonly remoteError?: string
   readonly resetCwdTo?: string
+}
+
+/** Metadata remembered when a worktree is removed so Settings -> Archived can group by Git repo + branch. */
+export interface ArchivedBranchRecord {
+  readonly path: string
+  readonly branch: string
+  readonly repositoryRoot?: string
+  readonly repositoryName: string
+  readonly removedAt: string
+  readonly sessionIds?: readonly string[]
+}
+
+/** `archivedMeta` outcome consumed by the Settings -> Archived Sessions page. */
+export interface WorktreeArchivedMetaValue {
+  readonly branches: readonly ArchivedBranchRecord[]
+  /** Known repo roots + display names + poolPaths so any pool/external session cwd can be attributed cleanly. */
+  readonly repos: ReadonlyArray<{
+    readonly repositoryRoot: string
+    readonly name: string
+    readonly poolPath: string
+  }>
 }
 
 /** `enter` outcome. */

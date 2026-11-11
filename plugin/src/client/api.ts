@@ -5,6 +5,7 @@
  */
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import type {
+  WorktreeArchivedMetaValue,
   WorktreeBranchesValue,
   WorktreeCreateValue,
   WorktreeEnsureWorkspaceValue,
@@ -17,6 +18,7 @@ import type {
 
 export interface WorktreeApi {
   overview(includeDirty?: boolean, signal?: AbortSignal): Promise<WorktreeOverviewValue>
+  archivedMeta(signal?: AbortSignal): Promise<WorktreeArchivedMetaValue>
   branches(repositoryRoot: string, refresh?: boolean, signal?: AbortSignal): Promise<WorktreeBranchesValue>
   create(
     input: { repositoryRoot: string; name?: string; from?: string; parentPath?: string },
@@ -24,7 +26,7 @@ export interface WorktreeApi {
   ): Promise<WorktreeCreateValue>
   ensureWorkspace(path: string, title?: string, signal?: AbortSignal): Promise<WorktreeEnsureWorkspaceValue>
   setPinned(path: string, pinned: boolean, signal?: AbortSignal): Promise<WorktreePinValue>
-  remove(path: string, force: boolean, signal?: AbortSignal): Promise<WorktreeRemoveValue>
+  remove(path: string, force: boolean, deleteRemote?: boolean, signal?: AbortSignal): Promise<WorktreeRemoveValue>
   status(path: string, signal?: AbortSignal): Promise<WorktreeStatusValue>
 }
 
@@ -57,12 +59,13 @@ export function createWorktreeApi(ctx: ClientContext): WorktreeApi {
 
   return {
     overview: (includeDirty = false, signal) => call('overview', { includeDirty }, signal),
+    archivedMeta: signal => call('archivedMeta', {}, signal),
     branches: (repositoryRoot, refresh = false, signal) => call('branches', { repositoryRoot, refresh }, signal),
     create: ({ repositoryRoot, name, from, parentPath }, signal) =>
       call('create', { repositoryRoot, name, from, parentPath }, signal),
     ensureWorkspace: (path, title, signal) => call('ensureWorkspace', { path, title }, signal),
     setPinned: (path, pinned, signal) => call('setPinned', { path, pinned }, signal),
-    remove: (path, force, signal) => call('remove', { path, force }, signal),
+    remove: (path, force, deleteRemote, signal) => call('remove', { path, force, deleteRemote }, signal),
     status: (path, signal) => call('status', { path }, signal),
   }
 }

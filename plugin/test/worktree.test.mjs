@@ -85,8 +85,10 @@ function makeHostStubs(initialWorkspaces) {
     },
   }
 
+  const archivedSessionIds = []
   const workspaceRegistry = {
     list: () => [...workspaces],
+    archivedSessionIds,
     async resolveByPath(p) {
       const canon = realpathSync(p)
       return workspaces.find(w => w.path === canon)
@@ -95,7 +97,7 @@ function makeHostStubs(initialWorkspaces) {
       const canon = realpathSync(p)
       const existing = workspaces.find(w => w.path === canon)
       if (existing) return existing
-      const entity = { id: `ws-${wsSeq++}`, path: canon, title: title ?? canon.split('/').pop() }
+      const entity = { id: `ws-${wsSeq++}`, path: canon, title: title ?? canon.split('/').pop(), sessionIds: [] }
       workspaces.push(entity)
       return entity
     },
@@ -104,6 +106,9 @@ function makeHostStubs(initialWorkspaces) {
       if (idx < 0) return false
       workspaces.splice(idx, 1)
       return true
+    },
+    async archiveSession(sessionId) {
+      if (!archivedSessionIds.includes(sessionId)) archivedSessionIds.push(sessionId)
     },
   }
 
@@ -124,7 +129,25 @@ function makeHostStubs(initialWorkspaces) {
     },
   }
 
-  return { fsService, subprocessService, workspaceRegistry, workingDirectory, tools, registeredTools, workspaces }
+  const storedSessions = []
+  const sessionPersistence = {
+    async list() {
+      return [...storedSessions]
+    },
+  }
+
+  return {
+    fsService,
+    subprocessService,
+    workspaceRegistry,
+    sessionPersistence,
+    storedSessions,
+    archivedSessionIds,
+    workingDirectory,
+    tools,
+    registeredTools,
+    workspaces,
+  }
 }
 
 test('WorktreeManagerService end-to-end: SRC descriptors, multi-repo overview, lineage create, pin, workspace sync, safe remove', async () => {
@@ -146,6 +169,7 @@ test('WorktreeManagerService end-to-end: SRC descriptors, multi-repo overview, l
     ctx.provide('subprocess', stubs.subprocessService)
     ctx.provide('workingDirectory', stubs.workingDirectory)
     ctx.provide('workspaceRegistry', stubs.workspaceRegistry)
+    ctx.provide('sessionPersistence', stubs.sessionPersistence)
     ctx.provide('tools', stubs.tools)
 
     // Mount through Cordis `ctx.plugin(...)` so Proxy `inject` enforcement runs identically to Host!
@@ -158,7 +182,16 @@ test('WorktreeManagerService end-to-end: SRC descriptors, multi-repo overview, l
     // 1. Verify Typert SRC markers & browser verbs carry zero `agent` parameter!
     const methods = remoteMethods(svc)
     const exportedNames = methods.map(m => m.exportName ?? m.method).sort()
-    assert.deepEqual(exportedNames, ['branches', 'create', 'ensureWorkspace', 'overview', 'remove', 'setPinned', 'status'])
+    assert.deepEqual(exportedNames, [
+      'archivedMeta',
+      'branches',
+      'create',
+      'ensureWorkspace',
+      'overview',
+      'remove',
+      'setPinned',
+      'status',
+    ])
     for (const m of methods) {
       const src = String(svc[m.method])
       const header = src.slice(0, src.indexOf('{'))
@@ -274,6 +307,103 @@ test('WorktreeManagerService end-to-end: SRC descriptors, multi-repo overview, l
     assert.equal(removedSub.ok, true)
     const removedGen = await svc.remove(genRow.path, false)
     assert.equal(removedGen.ok, true)
+
+    // 7b. Full cleanup: an unpushed branch with unmerged commits is force-deleted and flagged.
+    const createdUnmerged = await svc.create(repoDir, 'feat_unmerged', 'HEAD', repoDir)
+    assert.equal(createdUnmerged.ok, true)
+    writeFileSync(join(createdUnmerged.value.path, 'wip.txt'), 'unmerged\n')
+    execFileSync('git', ['-C', createdUnmerged.value.path, 'add', 'wip.txt'])
+    execFileSync('git', ['-C', createdUnmerged.value.path, 'commit', '-m', 'wip'])
+    const removedUnmerged = await svc.remove(createdUnmerged.value.path, false)
+    assert.equal(removedUnmerged.ok, true)
+    assert.equal(removedUnmerged.value.branchDeleted, true)
+    assert.equal(removedUnmerged.value.branchHadUnmerged, true)
+    assert.equal(removedUnmerged.value.remoteDeleted, undefined)
+    assert.equal(
+      execFileSync('git', ['-C', repoDir, 'branch', '--list', 'feat_unmerged'], { encoding: 'utf8' }).trim(),
+      '',
+      'unmerged branch must be gone after remove',
+    )
+
+    // 7c. Pushed branch: overview exposes the upstream and remove can delete the remote branch too.
+    // Note `branch -d` succeeds here already because git treats the pushed upstream as merged.
+    const createdPushed = await svc.create(repoDir, 'feat_pushed', 'HEAD', repoDir)
+    assert.equal(createdPushed.ok, true)
+    execFileSync('git', ['-C', createdPushed.value.path, 'push', '-u', 'origin', 'feat_pushed'])
+    const withUpstream = await svc.overview(true)
+    const upstreamRow = withUpstream.value.repos[0].rows.find(r => r.branch === 'feat_pushed')
+    assert.equal(upstreamRow.upstream, 'origin/feat_pushed')
+    const removedPushed = await svc.remove(createdPushed.value.path, false, true)
+    assert.equal(removedPushed.ok, true)
+    assert.equal(removedPushed.value.remoteDeleted, true)
+    assert.equal(
+      execFileSync('git', ['-C', repoDir, 'branch', '-r', '--list', 'origin/feat_pushed'], { encoding: 'utf8' }).trim(),
+      '',
+      'remote branch must be gone when deleteRemote is set',
+    )
+
+    // 7d. Ghost guard: a checkout deleted outside the plugin (rm -rf) is hidden from overview,
+    // flagged in `missingPaths` when registered as a Workspace, and removable cleanly via `svc.remove`.
+    const ghostCreated = await svc.create(repoDir, 'ghost_branch', 'HEAD', repoDir)
+    assert.equal(ghostCreated.ok, true)
+    rmSync(ghostCreated.value.path, { recursive: true, force: true })
+    const ghostOverview = await svc.overview(true)
+    assert.ok(
+      !ghostOverview.value.repos[0].rows.some(r => r.branch === 'ghost_branch'),
+      'checkout deleted on disk must not be listed',
+    )
+    assert.ok(
+      ghostOverview.value.missingPaths.includes(ghostCreated.value.path),
+      'missing workspace path must be reported in missingPaths',
+    )
+    const ghostRemoved = await svc.remove(ghostCreated.value.path, false)
+    assert.equal(ghostRemoved.ok, true)
+    assert.ok(
+      !stubs.workspaces.some(w => w.path === ghostCreated.value.path),
+      'removing a missing checkout must unregister its stale Workspace',
+    )
+
+    // 7e. Removing a worktree auto-archives its sessions via `workspaceRegistry.archiveSession`
+    // and records repo/branch metadata in `archivedMeta()` for Settings -> Archived Sessions.
+    const createdWithChats = await svc.create(repoDir, 'feat_archive_demo', 'HEAD', repoDir)
+    assert.equal(createdWithChats.ok, true)
+    stubs.storedSessions.push(
+      { header: { id: 'session-arch-1', cwd: createdWithChats.value.path } },
+      { header: { id: 'session-arch-2', cwd: `${createdWithChats.value.path}/sub` } },
+    )
+    const removedWithChats = await svc.remove(createdWithChats.value.path, false)
+    assert.equal(removedWithChats.ok, true)
+    assert.equal(removedWithChats.value.archivedCount, 2)
+    assert.ok(stubs.archivedSessionIds.includes('session-arch-1'))
+    assert.ok(stubs.archivedSessionIds.includes('session-arch-2'))
+
+    const archMeta = await svc.archivedMeta()
+    assert.equal(archMeta.ok, true)
+    const archBranch = archMeta.value.branches.find(b => b.branch === 'feat_archive_demo')
+    assert.ok(archBranch, 'archivedMeta must record removed branch')
+    assert.equal(archBranch.repositoryRoot, repoDir)
+    assert.equal(archBranch.repositoryName, 'qiz-pg-penta-server')
+    assert.deepEqual(archBranch.sessionIds, ['session-arch-1', 'session-arch-2'])
+
+    // 8b. Verify default poolRoot resolves to $HOME/.dsh/dsh-orca-worktrees when DSH_WORKTREE_POOL is unset.
+    const savedPool = process.env.DSH_WORKTREE_POOL
+    const savedDshHome = process.env.DSH_HOME
+    const savedHome = process.env.HOME
+    try {
+      delete process.env.DSH_WORKTREE_POOL
+      delete process.env.DSH_HOME
+      process.env.HOME = join(tempRoot, 'fake-home')
+      const defaultPoolCheck = await svc.overview(false)
+      assert.equal(defaultPoolCheck.ok, true)
+      assert.ok(
+        defaultPoolCheck.value.repos[0].poolPath.startsWith(join(tempRoot, 'fake-home', '.dsh', 'dsh-orca-worktrees')),
+        `expected poolPath under ~/.dsh/dsh-orca-worktrees, got ${defaultPoolCheck.value.repos[0].poolPath}`,
+      )
+    } finally {
+      process.env.DSH_WORKTREE_POOL = savedPool
+      if (savedDshHome !== undefined) process.env.DSH_HOME = savedDshHome
+      process.env.HOME = savedHome
+    }
 
     execFileSync('git', ['-C', repoDir, 'worktree', 'remove', '--force', manualLeaf])
     execFileSync('git', ['-C', repoDir, 'worktree', 'remove', '--force', manualPath])

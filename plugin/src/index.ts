@@ -35,6 +35,8 @@ function randomHex6(): string {
   return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('')
 }
 import type {
+  ArchivedBranchRecord,
+  WorktreeArchivedMetaValue,
   WorktreeBranchesValue,
   WorktreeCreateValue,
   WorktreeEnsureWorkspaceValue,
@@ -50,12 +52,17 @@ import type {
   WorktreeStatusValue,
 } from './protocol.ts'
 
-// Unified pool: every repo's worktrees live under <plugin install>/worktrees/<repo-key>/.
-// DSH_WORKTREE_POOL overrides the base (tests, or read-only plugin installs).
+// Unified pool: every repo's worktrees live under ~/.dsh/dsh-orca-worktrees/<repo-key>/.
+// DSH_WORKTREE_POOL overrides the base (tests, or custom pool locations).
 function poolRoot(): string {
-  const override = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.DSH_WORKTREE_POOL
-  // shortcut: import.meta URL decode assumes percent-encoded POSIX path; revisit for Windows installs
-  return override ?? `${decodeURIComponent(new URL('.', import.meta.url).pathname.replace(/\/+$/, ''))}/worktrees`
+  const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env
+  const override = env?.DSH_WORKTREE_POOL?.trim()
+  if (override) return override.replace(/[/\\]+$/, '')
+  const dshHome = env?.DSH_HOME?.trim()
+  if (dshHome) return `${dshHome.replace(/[/\\]+$/, '')}/dsh-orca-worktrees`
+  const home = (env?.HOME ?? env?.USERPROFILE)?.trim()
+  if (home) return `${home.replace(/[/\\]+$/, '')}/.dsh/dsh-orca-worktrees`
+  return `${decodeURIComponent(new URL('.', import.meta.url).pathname.replace(/\/+$/, ''))}/worktrees`
 }
 const REGISTRY_FILE = 'worktree-manager.json'
 const REGISTRY_VERSION = 2
@@ -127,6 +134,7 @@ interface WorkspaceEntityLike {
   readonly id: string
   readonly path: string
   readonly title: string
+  readonly sessionIds?: readonly string[]
 }
 
 interface WorkspaceRegistryService {
@@ -134,6 +142,15 @@ interface WorkspaceRegistryService {
   create(path: string, title?: string): Promise<WorkspaceEntityLike>
   delete(id: string): Promise<boolean>
   resolveByPath(path: string): Promise<WorkspaceEntityLike | undefined>
+  archiveSession?(sessionId: string, options?: { stopActivity?: boolean }): Promise<void>
+}
+
+interface SessionPersistenceService {
+  list(): Promise<ReadonlyArray<{ header: { id: string; cwd?: string } }>>
+}
+
+interface LiveSessionsService {
+  list(): ReadonlyArray<{ header: { id: string; cwd?: string } }>
 }
 
 interface ToolsService {
@@ -146,6 +163,8 @@ interface HostServices {
   sandboxPolicy?: SandboxPolicyService
   workingDirectory: WorkingDirectoryService
   workspaceRegistry?: WorkspaceRegistryService
+  sessionPersistence?: SessionPersistenceService
+  sessions?: LiveSessionsService
   tools?: ToolsService
 }
 
@@ -165,6 +184,8 @@ interface RegistryFile {
   /** Paths explicitly unpinned (since main checkout defaults to pinned unless unpinned). */
   unpinnedPaths?: string[]
   worktrees: RegistryEntry[]
+  /** Historical branch -> path / session mapping retained after worktree removal for Settings -> Archived. */
+  archivedBranches?: ArchivedBranchRecord[]
 }
 
 const GIT_ENV: Record<string, string | undefined> = Object.fromEntries(
@@ -228,10 +249,16 @@ export default class WorktreeManagerService extends TypertRemoteService {
       const repoOrder: string[] = []
       const seenRoots = new Set<string>()
       const claimedPaths = new Set<string>()
+      const missingPaths = new Set<string>()
       const hostPolicy = { mode: 'danger-full-access' }
 
       await Promise.all(
         workspaces.map(async ws => {
+          const stat = await this.fs().lstat(ws.path, undefined, signal).catch(() => undefined)
+          if (stat === undefined) {
+            missingPaths.add(ws.path)
+            return undefined
+          }
           const root = await this.tryRepositoryRootOf(hostPolicy, ws.path, signal)
           if (root !== undefined) {
             claimedPaths.add(ws.path)
@@ -264,7 +291,7 @@ export default class WorktreeManagerService extends TypertRemoteService {
         }),
       )
 
-      return ok({ repos, claimedPaths: [...claimedPaths] })
+      return ok({ repos, claimedPaths: [...claimedPaths], missingPaths: [...missingPaths] })
     } catch (error) {
       return fail(error)
     }
@@ -415,10 +442,18 @@ export default class WorktreeManagerService extends TypertRemoteService {
   async remove(
     path: string,
     force: boolean | undefined,
+    deleteRemote?: boolean | undefined,
     signal?: AbortSignal,
   ): Promise<WorktreeEnvelope<WorktreeRemoveValue>> {
     try {
-      const removed = await this.removeInternal({ mode: 'danger-full-access' }, undefined, path, force === true, signal)
+      const removed = await this.removeInternal(
+        { mode: 'danger-full-access' },
+        undefined,
+        path,
+        force === true,
+        signal,
+        deleteRemote === true,
+      )
       return ok(removed)
     } catch (error) {
       return fail(error)
@@ -431,6 +466,55 @@ export default class WorktreeManagerService extends TypertRemoteService {
     try {
       const value = await this.statusInternal({ mode: 'danger-full-access' }, path, signal)
       return ok(value)
+    } catch (error) {
+      return fail(error)
+    }
+  }
+
+  /** Historical branch & repository metadata for Settings -> Archived Sessions grouping. */
+  @Remote('archivedMeta')
+  async archivedMeta(signal?: AbortSignal): Promise<WorktreeEnvelope<WorktreeArchivedMetaValue>> {
+    try {
+      const reg = await this.registry()
+      const wsRegistry = this.host().workspaceRegistry
+      const workspaces = wsRegistry !== undefined ? wsRegistry.list() : []
+      const wsByPath = new Map<string, WorkspaceEntityLike>()
+      for (const ws of workspaces) wsByPath.set(ws.path, ws)
+
+      const hostPolicy = { mode: 'danger-full-access' }
+      const seenRoots = new Set<string>()
+      const repos: Array<{ repositoryRoot: string; name: string; poolPath: string }> = []
+
+      const resolved = await Promise.all(
+        workspaces.map(async ws => this.tryRepositoryRootOf(hostPolicy, ws.path, signal)),
+      )
+      for (const root of resolved) {
+        if (root === undefined || seenRoots.has(root)) continue
+        seenRoots.add(root)
+        const rootWs = wsByPath.get(root)
+        repos.push({
+          repositoryRoot: root,
+          name: rootWs?.title && rootWs.title !== 'default-workspace' ? rootWs.title : pathBasename(root) || root,
+          poolPath: await this.poolPath(root),
+        })
+      }
+
+      // Also include any repositoryRoot referenced by archivedBranches so deleted-repo histories still resolve.
+      for (const item of reg.archivedBranches ?? []) {
+        if (item.repositoryRoot && !seenRoots.has(item.repositoryRoot)) {
+          seenRoots.add(item.repositoryRoot)
+          repos.push({
+            repositoryRoot: item.repositoryRoot,
+            name: item.repositoryName || pathBasename(item.repositoryRoot) || item.repositoryRoot,
+            poolPath: await this.poolPath(item.repositoryRoot),
+          })
+        }
+      }
+
+      return ok({
+        branches: reg.archivedBranches ?? [],
+        repos,
+      })
     } catch (error) {
       return fail(error)
     }
@@ -541,7 +625,73 @@ export default class WorktreeManagerService extends TypertRemoteService {
     path: string,
     force: boolean,
     signal?: AbortSignal,
+    deleteRemote = false,
   ): Promise<WorktreeRemoveValue> {
+    const stat = await this.fs().lstat(path, undefined, signal)
+    if (stat === undefined) {
+      // Missing checkout directory on disk: clean up stale plugin registry entry,
+      // prune parent git worktree metadata if known, archive sessions, and unregister DSH Workspace.
+      const resolvedMissing = await this.fs().resolve(path, { signal })
+      const missingCanonical = this.fs().processPath(resolvedMissing)
+      const registry = await this.registry()
+      const staleEntry = registry.worktrees.find(item => item.path === missingCanonical || item.path === path)
+      if (staleEntry?.repositoryRoot) {
+        await this.gitRunner(policy, signal)(staleEntry.repositoryRoot, ['worktree', 'prune'], [0, 1, 128]).catch(() => {})
+      }
+      const wsRegistry = this.host().workspaceRegistry
+      const matchedWs = wsRegistry?.list().find(ws => ws.path === missingCanonical || ws.path === path)
+      const archivedIds = await this.archiveSessionsInCheckout(
+        missingCanonical,
+        path,
+        matchedWs?.sessionIds,
+        callingAgent?.session.id,
+      )
+      const repoRoot = staleEntry?.repositoryRoot
+      const rootWs = repoRoot ? wsRegistry?.list().find(ws => ws.path === repoRoot) : undefined
+      const repoName =
+        rootWs?.title && rootWs.title !== 'default-workspace'
+          ? rootWs.title
+          : repoRoot
+            ? pathBasename(repoRoot) || repoRoot
+            : matchedWs?.title || pathBasename(missingCanonical)
+      const branchLabel = staleEntry?.branch || matchedWs?.title || pathBasename(missingCanonical)
+
+      await this.registryMutateFile(file => {
+        const archivedBranches = [...(file.archivedBranches ?? [])].filter(
+          item => item.path !== missingCanonical && item.path !== path,
+        )
+        if (archivedIds.length > 0 || staleEntry !== undefined || matchedWs !== undefined) {
+          archivedBranches.unshift({
+            path: missingCanonical,
+            branch: branchLabel,
+            ...(repoRoot !== undefined ? { repositoryRoot: repoRoot } : {}),
+            repositoryName: repoName,
+            removedAt: new Date().toISOString(),
+            ...(archivedIds.length > 0 ? { sessionIds: archivedIds } : {}),
+          })
+        }
+        return {
+          ...file,
+          unpinnedPaths: (file.unpinnedPaths ?? []).filter(p => p !== missingCanonical && p !== path),
+          worktrees: file.worktrees.filter(item => item.path !== missingCanonical && item.path !== path),
+          archivedBranches,
+        }
+      })
+      let wsDeleted = false
+      if (wsRegistry !== undefined && matchedWs !== undefined) {
+        wsDeleted = await wsRegistry.delete(matchedWs.id).catch(() => false)
+      }
+      if (staleEntry !== undefined || wsDeleted || archivedIds.length > 0) {
+        return {
+          path: missingCanonical,
+          branchDeleted: false,
+          branchHadUnmerged: false,
+          ...(archivedIds.length > 0 ? { archivedCount: archivedIds.length } : {}),
+        }
+      }
+      throw new WorktreeError('WORKTREE_NOT_FOUND', `no such directory: ${path}`)
+    }
+
     const canonical = await this.canonicalWorktreePath(policy, path, signal)
     const root = await this.repositoryRootOf(policy, canonical, signal)
     const pathTarget = await this.fs().resolve(canonical, { signal })
@@ -586,12 +736,46 @@ export default class WorktreeManagerService extends TypertRemoteService {
     await removeRun(root, ['worktree', 'remove', ...(force ? ['--force'] : []), '--', canonical])
 
     const run = this.gitRunner(policy, signal)
-    let branchPreserved = false
+    // User opted for full cleanup: the branch is deleted along with the worktree;
+    // unmerged branches fall through to -D and are flagged for a loud warning.
+    let branchDeleted = false
+    let branchHadUnmerged = false
+    let upstream: string | undefined
     if (branch !== undefined && !branch.startsWith('detached')) {
-      const outcome = await run(root, ['branch', '-d', branch], [0, 1])
-      branchPreserved = outcome.exitCode === 1
+      const up = await run(root, ['rev-parse', '--abbrev-ref', '--quiet', `${branch}@{upstream}`], [0, 1, 128])
+      if (up.exitCode === 0) upstream = up.stdout.trim() || undefined
+      const safe = await run(root, ['branch', '-d', branch], [0, 1])
+      if (safe.exitCode === 0) {
+        branchDeleted = true
+      } else {
+        const forced = await run(root, ['branch', '-D', branch], [0, 1])
+        branchDeleted = forced.exitCode === 0
+        branchHadUnmerged = branchDeleted
+      }
+    }
+    let remoteDeleted: boolean | undefined
+    let remoteError: string | undefined
+    if (deleteRemote && upstream !== undefined && upstream.includes('/')) {
+      const slash = upstream.indexOf('/')
+      const pushed = await run(root, ['push', '--delete', upstream.slice(0, slash), upstream.slice(slash + 1)], [0, 1, 128])
+      remoteDeleted = pushed.exitCode === 0
+      if (!remoteDeleted) remoteError = `failed to delete remote branch ${upstream}`
     }
     await run(root, ['worktree', 'prune'], [0, 1])
+
+    // Archive conversations bound to this checkout via official DSH `workspaceRegistry.archiveSession`
+    // before unregistering its Workspace entry, and record branch metadata for Settings -> Archived.
+    const wsRegistry = this.host().workspaceRegistry
+    const matched = wsRegistry?.list().find(ws => ws.path === canonical)
+    const rootWs = wsRegistry?.list().find(ws => ws.path === root)
+    const repoName = rootWs?.title && rootWs.title !== 'default-workspace' ? rootWs.title : pathBasename(root) || root
+    const branchLabel = branch ?? matched?.title ?? pathBasename(canonical)
+    const archivedIds = await this.archiveSessionsInCheckout(
+      canonical,
+      path,
+      matched?.sessionIds,
+      callingAgent?.session.id,
+    )
 
     await this.registryMutateFile(file => {
       const unpinned = (file.unpinnedPaths ?? []).filter(p => p !== canonical)
@@ -599,14 +783,23 @@ export default class WorktreeManagerService extends TypertRemoteService {
       if (force) {
         for (const item of next) if (item.parentPath === canonical) item.parentPath = undefined
       }
-      return { ...file, unpinnedPaths: unpinned, worktrees: next }
+      const prevArchived = file.archivedBranches ?? []
+      const existingRecord = prevArchived.find(item => item.path === canonical)
+      const mergedSessionIds = Array.from(new Set([...(existingRecord?.sessionIds ?? []), ...archivedIds]))
+      const archivedBranches = prevArchived.filter(item => item.path !== canonical)
+      archivedBranches.unshift({
+        path: canonical,
+        branch: branchLabel,
+        repositoryRoot: root,
+        repositoryName: repoName,
+        removedAt: new Date().toISOString(),
+        ...(mergedSessionIds.length > 0 ? { sessionIds: mergedSessionIds } : {}),
+      })
+      return { ...file, unpinnedPaths: unpinned, worktrees: next, archivedBranches }
     })
 
-    // Unregister the removed checkout's Workspace entry (keeps session history intact).
-    const wsRegistry = this.host().workspaceRegistry
-    if (wsRegistry !== undefined) {
-      const matched = wsRegistry.list().find(ws => ws.path === canonical)
-      if (matched !== undefined) await wsRegistry.delete(matched.id).catch(() => {})
+    if (wsRegistry !== undefined && matched !== undefined) {
+      await wsRegistry.delete(matched.id).catch(() => {})
     }
 
     let resetCwdTo: string | undefined
@@ -616,7 +809,15 @@ export default class WorktreeManagerService extends TypertRemoteService {
         resetCwdTo = await this.workingDirectory().set(callingAgent, root, signal)
       }
     }
-    return { path: canonical, branchPreserved, resetCwdTo }
+    return {
+      path: canonical,
+      branchDeleted,
+      branchHadUnmerged,
+      ...(archivedIds.length > 0 ? { archivedCount: archivedIds.length } : {}),
+      remoteDeleted,
+      remoteError,
+      resetCwdTo,
+    }
   }
 
   private async statusInternal(
@@ -746,13 +947,23 @@ export default class WorktreeManagerService extends TypertRemoteService {
           properties: {
             path: { type: 'string', description: 'Worktree checkout path.' },
             force: { type: 'boolean', description: 'Discard uncommitted changes and detach child worktrees.' },
+            deleteRemote: { type: 'boolean', description: 'Also delete the branch upstream (e.g. origin/<branch>) when set.' },
           },
           required: ['path'],
         },
         async execute(args, exec) {
           if (typeof args.path !== 'string' || args.path.length === 0) throw new Error('path is required')
           return JSON.parse(
-            JSON.stringify(await self.removeInternal(self.policy(exec.agent), exec.agent, args.path, args.force === true, exec.signal)),
+            JSON.stringify(
+              await self.removeInternal(
+                self.policy(exec.agent),
+                exec.agent,
+                args.path,
+                args.force === true,
+                exec.signal,
+                args.deleteRemote === true,
+              ),
+            ),
           )
         },
       },
@@ -801,12 +1012,13 @@ export default class WorktreeManagerService extends TypertRemoteService {
           version: REGISTRY_VERSION,
           unpinnedPaths: Array.isArray(parsed.unpinnedPaths) ? parsed.unpinnedPaths : [],
           worktrees: parsed.worktrees,
+          archivedBranches: Array.isArray(parsed.archivedBranches) ? parsed.archivedBranches : [],
         }
       }
     } catch {
       // Missing or corrupt degrades gracefully.
     }
-    return { version: REGISTRY_VERSION, unpinnedPaths: [], worktrees: [] }
+    return { version: REGISTRY_VERSION, unpinnedPaths: [], worktrees: [], archivedBranches: [] }
   }
 
   private async registryMutateFile(mutate: (file: RegistryFile) => RegistryFile): Promise<void> {
@@ -815,6 +1027,10 @@ export default class WorktreeManagerService extends TypertRemoteService {
       version: REGISTRY_VERSION,
       unpinnedPaths: [...(current.unpinnedPaths ?? [])],
       worktrees: current.worktrees.map(item => ({ ...item })),
+      archivedBranches: (current.archivedBranches ?? []).map(item => ({
+        ...item,
+        ...(item.sessionIds !== undefined ? { sessionIds: [...item.sessionIds] } : {}),
+      })),
     })
     const filePath = this.registryPath()
     // Written via the full-access helper script: `.agents/` is harness-managed and
@@ -826,6 +1042,64 @@ export default class WorktreeManagerService extends TypertRemoteService {
       COMMAND_TIMEOUT_MS,
       undefined,
     )
+  }
+
+  /**
+   * Archive every session whose cwd sits inside `canonicalPath` (or `rawPath`)
+   * or is explicitly accounted on the removed Workspace, delegating to DSH's
+   * authoritative `workspaceRegistry.archiveSession`. Never archives `excludeSessionId`
+   * when an active Agent removes a worktree from inside its own turn.
+   */
+  private async archiveSessionsInCheckout(
+    canonicalPath: string,
+    rawPath: string,
+    explicitSessionIds: readonly string[] | undefined,
+    excludeSessionId: string | undefined,
+  ): Promise<string[]> {
+    const host = this.host()
+    const wsRegistry = host.workspaceRegistry
+    if (wsRegistry === undefined || typeof wsRegistry.archiveSession !== 'function') return []
+
+    const candidates = new Set<string>(explicitSessionIds ?? [])
+    const matchesPath = (cwd: string | undefined): boolean => {
+      if (!cwd) return false
+      const norm = cwd.length > 1 ? cwd.replace(/\/+$/, '') : cwd
+      return (
+        norm === canonicalPath ||
+        norm.startsWith(`${canonicalPath}/`) ||
+        norm === rawPath ||
+        norm.startsWith(`${rawPath}/`)
+      )
+    }
+
+    try {
+      for (const live of host.sessions?.list() ?? []) {
+        if (matchesPath(live.header?.cwd)) candidates.add(live.header.id)
+      }
+    } catch {
+      // Optional live session index.
+    }
+    try {
+      const stored = await host.sessionPersistence?.list()
+      for (const snap of stored ?? []) {
+        if (matchesPath(snap.header?.cwd)) candidates.add(snap.header.id)
+      }
+    } catch {
+      // Optional persistence listing.
+    }
+
+    if (excludeSessionId !== undefined) candidates.delete(excludeSessionId)
+
+    const archived: string[] = []
+    for (const sid of candidates) {
+      try {
+        await wsRegistry.archiveSession(sid, { stopActivity: true })
+        archived.push(sid)
+      } catch {
+        // Ignore unknown/blank transient sessions not yet materialized.
+      }
+    }
+    return archived
   }
 
   // ---------------------------------------------------------------------
@@ -849,6 +1123,8 @@ export default class WorktreeManagerService extends TypertRemoteService {
       subprocess: this.getService('subprocess')!,
       workingDirectory: this.getService('workingDirectory')!,
       workspaceRegistry: this.getService('workspaceRegistry'),
+      sessionPersistence: this.getService('sessionPersistence'),
+      sessions: this.getService('sessions'),
       tools: this.getService('tools'),
       sandbox: this.getService('sandbox'),
       sandboxPolicy: this.getService('sandboxPolicy'),
@@ -1035,10 +1311,12 @@ export default class WorktreeManagerService extends TypertRemoteService {
       parsedBlocks.push({ canonicalPath, branch, isMain, isManaged })
     }
 
-    // Lineage fallback: a worktree nested inside another worktree (registry entry
-    // absent, e.g. created by the native DSH tool) is its physical child.
+    // Lineage fallback: a non-managed external worktree nested inside another worktree
+    // (registry entry absent, e.g. created by the native DSH `.agents/worktrees` tool)
+    // is its physical child. Managed pool checkouts stay top-level unless given an explicit parentPath.
     const derivedParentOf = new Map<string, string>()
     for (const block of parsedBlocks) {
+      if (block.isManaged) continue
       let best: string | undefined
       for (const other of parsedBlocks) {
         if (other.canonicalPath === block.canonicalPath) continue
@@ -1048,29 +1326,40 @@ export default class WorktreeManagerService extends TypertRemoteService {
       if (best !== undefined) derivedParentOf.set(block.canonicalPath, best)
     }
 
-    const rows = await Promise.all(
-      parsedBlocks.map(async ({ canonicalPath, branch, isMain, isManaged }): Promise<WorktreeRow> => {
-        const entry = registry.worktrees.find(item => item.path === canonicalPath)
-        // Main checkout defaults to starred (like Orca's primary branch star) unless explicitly unpinned.
-        const pinned = entry?.pinned !== undefined ? entry.pinned : isMain && !unpinned.has(canonicalPath)
-        const dirtyCount = includeDirty ? await this.dirtyCountOf(policy, canonicalPath, signal) : 0
-        const linkedWs = wsByPath.get(canonicalPath)
-        return {
-          path: canonicalPath,
-          branch,
-          kind: isMain ? 'main' : isManaged ? 'managed' : 'external',
-          dirtyCount,
-          pinned,
-          displayName: entry?.displayName,
-          parentPath: entry?.parentPath ?? derivedParentOf.get(canonicalPath),
-          createdAt: entry?.createdAt,
-          workspaceId: linkedWs?.id,
-          ...(currentCwd !== undefined
-            ? { current: currentCwd === canonicalPath || currentCwd.startsWith(`${canonicalPath}/`) }
-            : {}),
-        }
-      }),
-    )
+    const rows = (
+      await Promise.all(
+        parsedBlocks.map(async ({ canonicalPath, branch, isMain, isManaged }): Promise<WorktreeRow | undefined> => {
+          // Ghost guard: a checkout deleted outside the plugin (rm -rf) leaves a prunable
+          // git registration; hide the row instead of listing a directory that is gone.
+          if ((await this.fs().lstat(canonicalPath, undefined, signal)) === undefined) return undefined
+          const entry = registry.worktrees.find(item => item.path === canonicalPath)
+          // Main checkout defaults to starred (like Orca's primary branch star) unless explicitly unpinned.
+          const pinned = entry?.pinned !== undefined ? entry.pinned : isMain && !unpinned.has(canonicalPath)
+          const dirtyCount = includeDirty ? await this.dirtyCountOf(policy, canonicalPath, signal) : 0
+          let upstream: string | undefined
+          if (!branch.startsWith('detached')) {
+            const up = await run(root, ['rev-parse', '--abbrev-ref', '--quiet', `${branch}@{upstream}`], [0, 1, 128])
+            if (up.exitCode === 0) upstream = up.stdout.trim() || undefined
+          }
+          const linkedWs = wsByPath.get(canonicalPath)
+          return {
+            path: canonicalPath,
+            branch,
+            kind: isMain ? 'main' : isManaged ? 'managed' : 'external',
+            dirtyCount,
+            pinned,
+            upstream,
+            displayName: entry?.displayName,
+            parentPath: entry?.parentPath ?? derivedParentOf.get(canonicalPath),
+            createdAt: entry?.createdAt,
+            workspaceId: linkedWs?.id,
+            ...(currentCwd !== undefined
+              ? { current: currentCwd === canonicalPath || currentCwd.startsWith(`${canonicalPath}/`) }
+              : {}),
+          }
+        }),
+      )
+    ).filter((row): row is WorktreeRow => row !== undefined)
 
     // Pinned rows keep natural priority after main, or sort main -> pinned -> rest by branch.
     const rank = { main: 0, managed: 1, external: 2 } as const

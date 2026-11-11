@@ -11,6 +11,7 @@ import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type { WorktreeOverviewValue, WorktreeRow } from '../protocol.ts'
 import { createWorktreeApi, type WorktreeApi } from './api.ts'
+import { ArchivedSessionsSection } from './ArchivedSessionsSection.tsx'
 import { IconCreate, IconRemove } from './icons.tsx'
 import { OrcaSidebar } from './OrcaSidebar.tsx'
 import { injectStyles, removeStyles } from './styles.ts'
@@ -54,10 +55,14 @@ interface UiWorkspaceFace {
   openSession(sessionId: string): void
   startSession(workspaceId?: string): void
   pickDirectory(): Promise<string | null>
+  unarchiveSession?(sessionId: string): Promise<void>
 }
 
 interface WorkspacesFace {
   create(input: { path: string }): Promise<{ workspaceId: string }>
+  rename(workspaceId: string, title: string): Promise<unknown>
+  delete(workspaceId: string): Promise<void>
+  unarchiveSession?(sessionId: string): Promise<void>
 }
 
 interface SlotsFace {
@@ -69,6 +74,7 @@ type ServiceEventFace = { on(name: 'internal/service', listener: (name: string) 
 
 const ICON_CREATE = 'worktreeManager.create'
 const ICON_REMOVE = 'worktreeManager.remove'
+const MENU_TARGET_WORKSPACE = 'worktreeManager.workspace'
 
 export function apply(ctx: ClientContext): void {
   injectStyles()
@@ -117,6 +123,8 @@ export function apply(ctx: ClientContext): void {
           openSession: (sessionId: string) => { uiWorkspace.openSession(sessionId) },
           startSession: (workspaceId?: string) => { uiWorkspace.startSession(workspaceId) },
           pickAndAddWorkspace,
+          renameWorkspace: (workspaceId: string, title: string) => workspaces.rename(workspaceId, title),
+          deleteWorkspace: (workspaceId: string) => workspaces.delete(workspaceId),
           openWorkspaceMenu: (
             workspaceId: string | undefined,
             path: string,
@@ -125,9 +133,9 @@ export function apply(ctx: ClientContext): void {
           ) => {
             getMenus()?.open(
               {
-                kind: 'workspace',
+                kind: MENU_TARGET_WORKSPACE,
                 value: {
-                  ...(workspaceId !== undefined ? { workspaceId } : { workspaceId: '' }),
+                  ...(workspaceId !== undefined ? { workspaceId } : {}),
                   path,
                   displayTitle,
                 },
@@ -150,6 +158,34 @@ export function apply(ctx: ClientContext): void {
     ),
   )
 
+  // Register `已归档会话` (`id: "archived-sessions"`) in the Settings modal nav (`settings.section`).
+  // Note: `dsh-client-ui-settings-general` natively recognizes `id === "archived-sessions"` with `IconArchiveOutlineMedium`.
+  slots.inject('settings.section', () =>
+    slots.register(
+      {
+        name: 'settings.section',
+        id: 'archived-sessions',
+        order: 25,
+        label: () => t('archive.nav'),
+        locale: NS,
+        inject: () => ({
+          api,
+          unarchiveSession: async (sessionId: string) => {
+            if (typeof uiWorkspace.unarchiveSession === 'function') {
+              await uiWorkspace.unarchiveSession(sessionId)
+            } else if (typeof workspaces.unarchiveSession === 'function') {
+              await workspaces.unarchiveSession(sessionId)
+            }
+          },
+          openSession: (sessionId: string) => {
+            uiWorkspace.openSession(sessionId)
+          },
+        }),
+      },
+      ArchivedSessionsSection,
+    ),
+  )
+
   for (const [key, icon] of [
     [ICON_CREATE, IconCreate],
     [ICON_REMOVE, IconRemove],
@@ -158,123 +194,202 @@ export function apply(ctx: ClientContext): void {
   }
 
   const registerMenu = (menus: ContextMenusFace): void => {
-    ctx.effect(
-      () =>
-        menus.register({
-          id: 'worktree-manager.workspace',
-          target: 'workspace',
-          order: 400,
-          resolve: async ({ path }, signal) => {
-            if (path === undefined || path.length === 0) return []
-            const data = await getFastOverview(signal)
-            if (data === null) return []
+    const buildActions = async (
+      {
+        workspaceId,
+        path,
+        displayTitle,
+        includeWorkspaceCrud,
+      }: { workspaceId?: string; path?: string; displayTitle?: string; includeWorkspaceCrud: boolean },
+      signal: AbortSignal,
+    ): Promise<readonly MenuAction[]> => {
+      if (path === undefined || path.length === 0) return []
+      const data = await getFastOverview(signal)
 
-            const norm = path.length > 1 ? path.replace(/\/+$/, '') : path
-            let matchedRepoRoot: string | undefined
-            let matchedRow: WorktreeRow | undefined
+      const norm = path.length > 1 ? path.replace(/\/+$/, '') : path
+      let matchedRepoRoot: string | undefined
+      let matchedRow: WorktreeRow | undefined
 
-            for (const repo of data.repos) {
-              for (const item of repo.rows) {
-                const itemNorm = item.path.length > 1 ? item.path.replace(/\/+$/, '') : item.path
-                if (norm !== itemNorm && !norm.startsWith(`${itemNorm}/`)) continue
-                if (matchedRow === undefined || itemNorm.length > matchedRow.path.length) {
-                  matchedRow = item
-                  matchedRepoRoot = repo.repositoryRoot
-                }
-              }
+      if (data !== null) {
+        for (const repo of data.repos) {
+          for (const item of repo.rows) {
+            const itemNorm = item.path.length > 1 ? item.path.replace(/\/+$/, '') : item.path
+            if (norm !== itemNorm && !norm.startsWith(`${itemNorm}/`)) continue
+            if (matchedRow === undefined || itemNorm.length > matchedRow.path.length) {
+              matchedRow = item
+              matchedRepoRoot = repo.repositoryRoot
             }
-            if (matchedRow === undefined || matchedRepoRoot === undefined) return []
+          }
+        }
+      }
 
-            const row = matchedRow
-            const repoRoot = matchedRepoRoot
-            const repoRows = data.repos.find(r => r.repositoryRoot === repoRoot)?.rows ?? []
-            const childCount = repoRows.filter(item => item.parentPath === row.path).length
+      const missingSet = new Set((data?.missingPaths ?? []).map(p => (p.length > 1 ? p.replace(/\/+$/, '') : p)))
+      const isMissing = missingSet.has(norm)
+      const actions: MenuAction[] = []
 
-            const actions: MenuAction[] = [
-              {
-                id: 'newChat',
-                label: t('menu.newChat'),
-                icon: { key: ICON_CREATE },
-                separatorBefore: true,
-                run: () => {
-                  window.dispatchEvent(new CustomEvent('dsh-worktree:new-chat', { detail: { row } }))
-                },
-              },
-              {
-                id: 'create',
-                label: t('menu.create'),
-                icon: { key: ICON_CREATE },
-                run: () => {
-                  window.dispatchEvent(
-                    new CustomEvent('dsh-worktree:open-create', {
-                      detail: { repositoryRoot: repoRoot },
-                    }),
-                  )
-                },
-              },
-              {
-                id: 'createChild',
-                label: t('menu.createChild'),
-                icon: { key: ICON_CREATE },
-                run: () => {
-                  window.dispatchEvent(
-                    new CustomEvent('dsh-worktree:open-create', {
-                      detail: {
-                        repositoryRoot: repoRoot,
-                        parentPath: row.path,
-                        parentBranch: row.branch,
-                      },
-                    }),
-                  )
-                },
-              },
-              {
-                id: 'pin',
-                label: row.pinned ? t('menu.unpin') : t('menu.pin'),
-                run: () =>
-                  api.setPinned(row.path, !row.pinned).then(() => {
-                    window.dispatchEvent(new CustomEvent('dsh-worktree:refresh'))
-                  }),
-              },
-              {
-                id: 'copyPath',
-                label: t('menu.copyPath'),
-                run: () =>
-                  navigator.clipboard?.writeText(row.path).then(() => {
-                    menus.notify(t('notice.copied'), true)
-                  }),
-              },
-            ]
+      if (matchedRow !== undefined && matchedRepoRoot !== undefined) {
+        const row = matchedRow
+        const repoRoot = matchedRepoRoot
+        const repoRows = data?.repos.find(r => r.repositoryRoot === repoRoot)?.rows ?? []
+        const childCount = repoRows.filter(item => item.parentPath === row.path).length
 
-            if (row.kind === 'managed') {
-              actions.push({
-                id: 'remove',
-                label: t('menu.remove'),
-                icon: { key: ICON_REMOVE },
-                danger: true,
-                separatorBefore: true,
-                run: async () => {
-                  // Fetch fresh dirty count right when opening the confirmation dialog.
-                  let freshRow = row
-                  try {
-                    const st = await api.status(row.path)
-                    freshRow = { ...row, dirtyCount: st.dirtyCount }
-                  } catch {
-                    // Keep cached row if status check fails.
-                  }
-                  window.dispatchEvent(
-                    new CustomEvent('dsh-worktree:open-remove', {
-                      detail: { row: freshRow, childCount },
-                    }),
-                  )
-                },
-              })
-            }
-            return actions
+        actions.push(
+          {
+            id: 'newChat',
+            label: t('menu.newChat'),
+            icon: { key: ICON_CREATE },
+            separatorBefore: !includeWorkspaceCrud,
+            run: () => {
+              window.dispatchEvent(new CustomEvent('dsh-worktree:new-chat', { detail: { row } }))
+            },
           },
-        }),
-      'worktree-manager: workspace context menu',
-    )
+          {
+            id: 'create',
+            label: t('menu.create'),
+            icon: { key: ICON_CREATE },
+            run: () => {
+              window.dispatchEvent(
+                new CustomEvent('dsh-worktree:open-create', {
+                  detail: { repositoryRoot: repoRoot },
+                }),
+              )
+            },
+          },
+          {
+            id: 'createChild',
+            label: t('menu.createChild'),
+            icon: { key: ICON_CREATE },
+            run: () => {
+              window.dispatchEvent(
+                new CustomEvent('dsh-worktree:open-create', {
+                  detail: {
+                    repositoryRoot: repoRoot,
+                    parentPath: row.path,
+                    parentBranch: row.branch,
+                  },
+                }),
+              )
+            },
+          },
+          {
+            id: 'pin',
+            label: row.pinned ? t('menu.unpin') : t('menu.pin'),
+            run: () =>
+              api.setPinned(row.path, !row.pinned).then(() => {
+                window.dispatchEvent(new CustomEvent('dsh-worktree:refresh'))
+              }),
+          },
+          {
+            id: 'copyPath',
+            label: t('menu.copyPath'),
+            run: () =>
+              navigator.clipboard?.writeText(row.path).then(() => {
+                menus.notify(t('notice.copied'), true)
+              }),
+          },
+        )
+
+        if (row.kind !== 'main') {
+          actions.push({
+            id: 'remove',
+            label: t('menu.remove'),
+            icon: { key: ICON_REMOVE },
+            danger: true,
+            separatorBefore: true,
+            run: async () => {
+              // Fetch fresh dirty count right when opening the confirmation dialog.
+              let freshRow = row
+              try {
+                const st = await api.status(row.path)
+                freshRow = { ...row, dirtyCount: st.dirtyCount }
+              } catch {
+                // Keep cached row if status check fails.
+              }
+              window.dispatchEvent(
+                new CustomEvent('dsh-worktree:open-remove', {
+                  detail: { row: freshRow, childCount },
+                }),
+              )
+            },
+          })
+        }
+      } else if (includeWorkspaceCrud) {
+        if (!isMissing && workspaceId) {
+          actions.push({
+            id: 'newChatFolder',
+            label: t('menu.newChat'),
+            icon: { key: ICON_CREATE },
+            run: () => {
+              uiWorkspace.startSession(workspaceId)
+            },
+          })
+        }
+        actions.push({
+          id: 'copyPath',
+          label: t('menu.copyPath'),
+          icon: { key: 'workspace.copy' },
+          run: () =>
+            navigator.clipboard?.writeText(path).then(() => {
+              menus.notify(t('notice.copied'), true)
+            }),
+        })
+      }
+
+      // Workspace-level Rename / Remove (replaces stock WorkspaceDialogs which are unmounted when OrcaSidebar is active).
+      const hasWsId = typeof workspaceId === 'string' && workspaceId.length > 0
+      const isSecondaryCheckout = matchedRow !== undefined && matchedRow.kind !== 'main'
+      if (includeWorkspaceCrud && hasWsId && !isSecondaryCheckout) {
+        const labelTitle = (displayTitle ?? '').trim() || path
+        actions.push({
+          id: 'wsRename',
+          label: t('menu.renameWorkspace'),
+          icon: { key: 'workspace.rename' },
+          separatorBefore: actions.length > 0,
+          run: () => {
+            window.dispatchEvent(
+              new CustomEvent('dsh-worktree:open-ws-rename', {
+                detail: { workspaceId, path, title: labelTitle },
+              }),
+            )
+          },
+        })
+        actions.push({
+          id: 'wsDelete',
+          label: t('menu.deleteWorkspace'),
+          icon: { key: 'workspace.delete' },
+          danger: true,
+          separatorBefore: true,
+          run: () => {
+            window.dispatchEvent(
+              new CustomEvent('dsh-worktree:open-ws-delete', {
+                detail: { workspaceId, path, title: labelTitle, missing: isMissing },
+              }),
+            )
+          },
+        })
+      }
+
+      return actions
+    }
+
+    ctx.effect(() => {
+      const offSidebarMenu = menus.register({
+        id: 'worktree-manager.sidebar-workspace',
+        target: MENU_TARGET_WORKSPACE,
+        order: 100,
+        resolve: (val, signal) => buildActions({ ...val, includeWorkspaceCrud: true }, signal),
+      })
+      const offSharedMenu = menus.register({
+        id: 'worktree-manager.workspace',
+        target: 'workspace',
+        order: 400,
+        resolve: (val, signal) => buildActions({ ...val, includeWorkspaceCrud: false }, signal),
+      })
+      return () => {
+        offSidebarMenu()
+        offSharedMenu()
+      }
+    }, 'worktree-manager: workspace context menu')
   }
 
   const initialMenus = getMenus()

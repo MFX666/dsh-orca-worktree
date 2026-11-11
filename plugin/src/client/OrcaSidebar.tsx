@@ -85,6 +85,8 @@ export interface OrcaSidebarProps {
   openSession: (sessionId: string) => void
   startSession: (workspaceId?: string) => void
   pickAndAddWorkspace: () => Promise<void>
+  renameWorkspace?: (workspaceId: string, title: string) => Promise<unknown>
+  deleteWorkspace?: (workspaceId: string) => Promise<void>
   openWorkspaceMenu: (workspaceId: string | undefined, path: string, title: string, point: { x: number; y: number }) => void
   openSessionMenu: (sessionId: string, displayTitle: string, point: { x: number; y: number }) => void
 }
@@ -98,6 +100,19 @@ interface CreateDialogState {
 interface RemoveDialogState {
   row: WorktreeRow
   childCount: number
+}
+
+interface WsRenameDialogState {
+  workspaceId: string
+  path: string
+  title: string
+}
+
+interface WsDeleteDialogState {
+  workspaceId: string
+  path: string
+  title: string
+  missing?: boolean
 }
 
 interface ToastNotice {
@@ -168,6 +183,10 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
   const [staleHostHint, setStaleHostHint] = useState(false)
   const [removeDialog, setRemoveDialog] = useState<RemoveDialogState | null>(null)
   const [forceRemove, setForceRemove] = useState(false)
+  const [removeRemote, setRemoveRemote] = useState(false)
+  const [wsRenameDialog, setWsRenameDialog] = useState<WsRenameDialogState | null>(null)
+  const [wsRenameDraft, setWsRenameDraft] = useState('')
+  const [wsDeleteDialog, setWsDeleteDialog] = useState<WsDeleteDialogState | null>(null)
   const [busy, setBusy] = useState(false)
   const [toast, setToast] = useState<ToastNotice | null>(null)
 
@@ -307,16 +326,18 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
 
   // Modal Escape listener.
   useEffect(() => {
-    if (createDialog === null && removeDialog === null) return
+    if (createDialog === null && removeDialog === null && wsRenameDialog === null && wsDeleteDialog === null) return
     const onKey = (event: KeyboardEvent) => {
       if (event.key === 'Escape' && !busy) {
         setCreateDialog(null)
         setRemoveDialog(null)
+        setWsRenameDialog(null)
+        setWsDeleteDialog(null)
       }
     }
     window.addEventListener('keydown', onKey)
     return () => { window.removeEventListener('keydown', onKey) }
-  }, [createDialog, removeDialog, busy])
+  }, [createDialog, removeDialog, wsRenameDialog, wsDeleteDialog, busy])
 
   const activeSessionId = useMemo(() => {
     if (panelActive) return undefined
@@ -408,6 +429,11 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
     }
     return workspaceSnap.items.filter(ws => !claimed.has(normalizePath(ws.path)))
   }, [overview, workspaceSnap.items])
+
+  const missingPathSet = useMemo(
+    () => new Set((overview?.missingPaths ?? []).map(normalizePath)),
+    [overview?.missingPaths],
+  )
 
   const toggleSetItem = (
     setter: (updater: (prev: ReadonlySet<string>) => ReadonlySet<string>) => void,
@@ -518,18 +544,65 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
     if (needsForce && !forceRemove) return
     setBusy(true)
     try {
-      const removed = await api.remove(row.path, forceRemove || !needsForce ? forceRemove : false)
+      const removed = await api.remove(row.path, forceRemove || !needsForce ? forceRemove : false, removeRemote)
       setRemoveDialog(null)
       setForceRemove(false)
-      const msg = `${t('notice.removed', { path: row.branch })}${removed.branchPreserved ? ` ${t('notice.preserved')}` : ''}`
-      showToast('info', msg)
+      setRemoveRemote(false)
+      const msg = `${t('notice.removed', { path: row.branch })}${
+        removed.archivedCount && removed.archivedCount > 0 ? ` ${t('notice.archivedCount', { count: removed.archivedCount })}` : ''
+      }${
+        removed.branchHadUnmerged ? ` ${t('notice.forceDeleted')}` : !removed.branchDeleted ? ` ${t('notice.preserved')}` : ''
+      }${removed.remoteDeleted ? ` ${t('notice.remoteDeleted')}` : ''}`
+      if (removed.remoteError !== undefined) {
+        showToast('error', `${msg} ${t('notice.remoteFailed', { message: removed.remoteError })}`)
+      } else {
+        showToast(removed.branchHadUnmerged ? 'error' : 'info', msg)
+      }
       await refreshOverview(true)
     } catch (error) {
       showToast('error', t('notice.error', { message: error instanceof Error ? error.message : String(error) }))
     } finally {
       setBusy(false)
     }
-  }, [api, busy, forceRemove, refreshOverview, removeDialog, showToast, t])
+  }, [api, busy, forceRemove, refreshOverview, removeDialog, removeRemote, showToast, t])
+
+  const submitWorkspaceRename = useCallback(async () => {
+    if (wsRenameDialog === null || busy || props.renameWorkspace === undefined) return
+    const nextTitle = wsRenameDraft.trim()
+    if (nextTitle === '' || nextTitle === wsRenameDialog.title) return
+    const conflict = workspaceSnap.items.some(
+      w => w.workspaceId !== wsRenameDialog.workspaceId && w.title === nextTitle,
+    )
+    if (conflict) return
+    setBusy(true)
+    try {
+      await props.renameWorkspace(wsRenameDialog.workspaceId, nextTitle)
+      setWsRenameDialog(null)
+      setWsRenameDraft('')
+      showToast('info', t('notice.wsRenamed', { name: nextTitle }))
+      await refreshOverview(true)
+    } catch (error) {
+      showToast('error', t('notice.error', { message: error instanceof Error ? error.message : String(error) }))
+    } finally {
+      setBusy(false)
+    }
+  }, [busy, props, refreshOverview, showToast, t, workspaceSnap.items, wsRenameDialog, wsRenameDraft])
+
+  const submitWorkspaceDelete = useCallback(async () => {
+    if (wsDeleteDialog === null || busy || props.deleteWorkspace === undefined) return
+    setBusy(true)
+    try {
+      await props.deleteWorkspace(wsDeleteDialog.workspaceId)
+      const deletedName = wsDeleteDialog.title
+      setWsDeleteDialog(null)
+      showToast('info', t('notice.wsDeleted', { name: deletedName }))
+      await refreshOverview(true)
+    } catch (error) {
+      showToast('error', t('notice.error', { message: error instanceof Error ? error.message : String(error) }))
+    } finally {
+      setBusy(false)
+    }
+  }, [busy, props, refreshOverview, showToast, t, wsDeleteDialog])
 
   const sessionStateKind = useCallback(
     (s: SessionSummaryLike): 'running' | 'pending' | 'idle' => {
@@ -912,6 +985,7 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
       const detail = (event as CustomEvent<RemoveDialogState>).detail
       if (!detail?.row) return
       setForceRemove(false)
+      setRemoveRemote(false)
       setRemoveDialog(detail)
     }
     const onRequestNewChat = (event: Event) => {
@@ -922,15 +996,30 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
     const onRequestRefresh = () => {
       void refreshOverview(true)
     }
+    const onRequestWsRename = (event: Event) => {
+      const detail = (event as CustomEvent<WsRenameDialogState>).detail
+      if (!detail?.workspaceId) return
+      setWsRenameDraft(detail.title)
+      setWsRenameDialog(detail)
+    }
+    const onRequestWsDelete = (event: Event) => {
+      const detail = (event as CustomEvent<WsDeleteDialogState>).detail
+      if (!detail?.workspaceId) return
+      setWsDeleteDialog(detail)
+    }
     window.addEventListener('dsh-worktree:open-create', onRequestCreate)
     window.addEventListener('dsh-worktree:open-remove', onRequestRemove)
     window.addEventListener('dsh-worktree:new-chat', onRequestNewChat)
     window.addEventListener('dsh-worktree:refresh', onRequestRefresh)
+    window.addEventListener('dsh-worktree:open-ws-rename', onRequestWsRename)
+    window.addEventListener('dsh-worktree:open-ws-delete', onRequestWsDelete)
     return () => {
       window.removeEventListener('dsh-worktree:open-create', onRequestCreate)
       window.removeEventListener('dsh-worktree:open-remove', onRequestRemove)
       window.removeEventListener('dsh-worktree:new-chat', onRequestNewChat)
       window.removeEventListener('dsh-worktree:refresh', onRequestRefresh)
+      window.removeEventListener('dsh-worktree:open-ws-rename', onRequestWsRename)
+      window.removeEventListener('dsh-worktree:open-ws-delete', onRequestWsDelete)
     }
   }, [refreshOverview, startNewChatInWorktree])
 
@@ -1015,9 +1104,10 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
       <div className="owt-scroll" role="tree" aria-label={t('header.title')}>
         {renderedRepos}
 
-        {/* Non-Git registered folder workspaces */}
+        {/* Non-Git registered folder workspaces (or missing-on-disk stale workspaces) */}
         {filteredNonGit.map(ws => {
           const norm = normalizePath(ws.path)
+          const isMissing = missingPathSet.has(norm)
           const collapsed = normalizedQuery === '' && collapsedRepos.has(norm)
           const chats = sessionsByPath.get(norm) ?? []
           return (
@@ -1026,7 +1116,8 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
                 className="owt-repo-row"
                 role="treeitem"
                 aria-expanded={!collapsed}
-                title={ws.path}
+                data-missing={isMissing ? 'true' : 'false'}
+                title={isMissing ? t('dialog.wsDelete.missingHint', { path: ws.path }) : ws.path}
                 onClick={() => { toggleSetItem(setCollapsedRepos, STORAGE_COLLAPSED_REPOS, norm) }}
                 onContextMenu={event => {
                   event.preventDefault()
@@ -1040,6 +1131,7 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
                   <IconFolder size={15} />
                 </span>
                 <span className="owt-repo-name">{ws.title}</span>
+                {isMissing && <span className="owt-missing-pill">{t('wt.missingBadge')}</span>}
                 <span className="owt-hover-actions" onClick={event => { event.stopPropagation() }}>
                   <button
                     type="button"
@@ -1061,14 +1153,16 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
                   >
                     <IconDots size={14} />
                   </button>
-                  <button
-                    type="button"
-                    className="owt-icon-btn"
-                    title={t('wt.newChat')}
-                    onClick={() => { props.startSession(ws.workspaceId) }}
-                  >
-                    <IconPlus size={14} />
-                  </button>
+                  {!isMissing && (
+                    <button
+                      type="button"
+                      className="owt-icon-btn"
+                      title={t('wt.newChat')}
+                      onClick={() => { props.startSession(ws.workspaceId) }}
+                    >
+                      <IconPlus size={14} />
+                    </button>
+                  )}
                 </span>
               </div>
               {!collapsed &&
@@ -1262,6 +1356,20 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
                 {t('dialog.remove.title', { branch: removeDialog.row.branch })}
               </div>
               <div className="owt-modal-desc">{t('dialog.remove.desc')}</div>
+              <div className="owt-modal-desc" data-kind="danger">
+                {t('dialog.remove.branch', { branch: removeDialog.row.branch })}
+              </div>
+              {removeDialog.row.upstream !== undefined && (
+                <label className="owt-modal-check">
+                  <input
+                    type="checkbox"
+                    checked={removeRemote}
+                    disabled={busy}
+                    onChange={event => { setRemoveRemote(event.target.checked) }}
+                  />
+                  <span>{t('dialog.remove.remote', { upstream: removeDialog.row.upstream })}</span>
+                </label>
+              )}
               {removeDialog.row.dirtyCount > 0 && (
                 <div className="owt-modal-desc">
                   {t('dialog.remove.dirty', { count: removeDialog.row.dirtyCount })}
@@ -1300,6 +1408,116 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
                   onClick={() => { void submitRemoveWorktree() }}
                 >
                   {t('dialog.remove.confirm')}
+                </button>
+              </div>
+            </div>
+          </div>,
+          document.body,
+        )}
+
+      {/* Rename Workspace Modal */}
+      {wsRenameDialog !== null &&
+        typeof document !== 'undefined' &&
+        (() => {
+          const trimmed = wsRenameDraft.trim()
+          const conflict =
+            trimmed !== '' &&
+            workspaceSnap.items.some(w => w.workspaceId !== wsRenameDialog.workspaceId && w.title === trimmed)
+          const blocked = busy || trimmed === '' || trimmed === wsRenameDialog.title || conflict
+          return createPortal(
+            <div
+              className="owt-modal-backdrop"
+              onClick={() => {
+                if (!busy) setWsRenameDialog(null)
+              }}
+            >
+              <div className="owt-modal" role="dialog" aria-modal="true" onClick={event => { event.stopPropagation() }}>
+                <div className="owt-modal-title">{t('dialog.wsRename.title')}</div>
+                <input
+                  className="owt-input"
+                  type="text"
+                  autoFocus
+                  disabled={busy}
+                  placeholder={t('dialog.wsRename.placeholder')}
+                  value={wsRenameDraft}
+                  onFocus={event => { event.target.select() }}
+                  onChange={event => { setWsRenameDraft(event.target.value) }}
+                  onCompositionStart={() => { composingRef.current = true }}
+                  onCompositionEnd={() => { composingRef.current = false }}
+                  onKeyDown={event => {
+                    if (event.key === 'Enter' && !composingRef.current && !blocked) {
+                      event.preventDefault()
+                      void submitWorkspaceRename()
+                    }
+                  }}
+                />
+                {conflict && (
+                  <div className="owt-modal-desc" data-kind="danger">
+                    {t('dialog.wsRename.conflict', { name: trimmed })}
+                  </div>
+                )}
+                <div className="owt-modal-foot">
+                  <button
+                    type="button"
+                    className="owt-btn"
+                    disabled={busy}
+                    onClick={() => { setWsRenameDialog(null) }}
+                  >
+                    {t('dialog.create.cancel')}
+                  </button>
+                  <button
+                    type="button"
+                    className="owt-btn"
+                    data-kind="primary"
+                    disabled={blocked}
+                    onClick={() => { void submitWorkspaceRename() }}
+                  >
+                    {t('dialog.wsRename.submit')}
+                  </button>
+                </div>
+              </div>
+            </div>,
+            document.body,
+          )
+        })()}
+
+      {/* Remove Workspace Modal */}
+      {wsDeleteDialog !== null &&
+        typeof document !== 'undefined' &&
+        createPortal(
+          <div
+            className="owt-modal-backdrop"
+            onClick={() => {
+              if (!busy) setWsDeleteDialog(null)
+            }}
+          >
+            <div className="owt-modal" role="dialog" aria-modal="true" onClick={event => { event.stopPropagation() }}>
+              <div className="owt-modal-title">
+                {t('dialog.wsDelete.title', { name: wsDeleteDialog.title })}
+              </div>
+              <div className="owt-modal-desc">{t('dialog.wsDelete.desc')}</div>
+              {wsDeleteDialog.missing && (
+                <div className="owt-modal-desc" data-kind="danger">
+                  {t('dialog.wsDelete.missingHint', { path: wsDeleteDialog.path })}
+                </div>
+              )}
+              <div className="owt-modal-foot">
+                <button
+                  type="button"
+                  className="owt-btn"
+                  disabled={busy}
+                  onClick={() => { setWsDeleteDialog(null) }}
+                >
+                  {t('dialog.create.cancel')}
+                </button>
+                <button
+                  type="button"
+                  className="owt-btn"
+                  data-kind="danger"
+                  disabled={busy}
+                  onClick={() => { void submitWorkspaceDelete() }}
+                >
+                  {t('dialog.wsDelete.confirm')}
                 </button>
               </div>
             </div>
