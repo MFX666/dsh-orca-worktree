@@ -50,7 +50,13 @@ import type {
   WorktreeStatusValue,
 } from './protocol.ts'
 
-const POOL_DIR = '.agents/worktrees'
+// Unified pool: every repo's worktrees live under <plugin install>/worktrees/<repo-key>/.
+// DSH_WORKTREE_POOL overrides the base (tests, or read-only plugin installs).
+function poolRoot(): string {
+  const override = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.DSH_WORKTREE_POOL
+  // shortcut: import.meta URL decode assumes percent-encoded POSIX path; revisit for Windows installs
+  return override ?? `${decodeURIComponent(new URL('.', import.meta.url).pathname.replace(/\/+$/, ''))}/worktrees`
+}
 const REGISTRY_FILE = 'worktree-manager.json'
 const REGISTRY_VERSION = 2
 const COMMAND_TIMEOUT_MS = 120_000
@@ -251,7 +257,7 @@ export default class WorktreeManagerService extends TypertRemoteService {
           return {
             repositoryRoot: root,
             name: rootWs?.title && rootWs.title !== 'default-workspace' ? rootWs.title : pathBasename(root) || root,
-            poolPath: this.poolPath(root),
+            poolPath: await this.poolPath(root),
             rootWorkspaceId: rootWs?.id,
             rows,
           }
@@ -383,7 +389,7 @@ export default class WorktreeManagerService extends TypertRemoteService {
       const canonical = await this.canonicalWorktreePath(policy, path, signal)
       const root = await this.repositoryRootOf(policy, canonical, signal)
       const branch = (await this.branchOf(policy, canonical, signal)) ?? pathBasename(canonical)
-      await this.registryMutateFile(root, file => {
+      await this.registryMutateFile(file => {
         const unpinned = new Set(file.unpinnedPaths ?? [])
         if (pinned) unpinned.delete(canonical)
         else unpinned.add(canonical)
@@ -441,7 +447,7 @@ export default class WorktreeManagerService extends TypertRemoteService {
     const wsByPath = new Map<string, WorkspaceEntityLike>()
     for (const ws of this.host().workspaceRegistry?.list() ?? []) wsByPath.set(ws.path, ws)
     const rows = await this.worktreeRows(root, policy, wsByPath, cwd, true, signal)
-    return { repositoryRoot: root, poolPath: this.poolPath(root), rows }
+    return { repositoryRoot: root, poolPath: await this.poolPath(root), rows }
   }
 
   private async createInternal(
@@ -475,7 +481,7 @@ export default class WorktreeManagerService extends TypertRemoteService {
       throw new WorktreeError('WORKTREE_BRANCH_EXISTS', `branch already exists: ${branch}`)
     }
 
-    const poolTarget = await this.fs().resolve(POOL_DIR, { cwd: root, signal })
+    const poolTarget = await this.fs().resolve(await this.poolPath(root), { signal })
     const poolPath = this.fs().processPath(poolTarget)
     const destTarget = await this.fs().resolve(branch, { cwd: poolPath, signal })
     const destPath = this.fs().processPath(destTarget)
@@ -492,7 +498,7 @@ export default class WorktreeManagerService extends TypertRemoteService {
     const canonicalDest = await this.canonicalWorktreePath(policy, destPath, signal)
     const canonicalParent = parentPath !== undefined ? await this.canonicalWorktreePath(policy, parentPath, signal) : undefined
 
-    await this.registryMutateFile(root, file => {
+    await this.registryMutateFile(file => {
       const rest = file.worktrees.filter(item => item.path !== canonicalDest)
       rest.push({
         path: canonicalDest,
@@ -538,17 +544,13 @@ export default class WorktreeManagerService extends TypertRemoteService {
   ): Promise<WorktreeRemoveValue> {
     const canonical = await this.canonicalWorktreePath(policy, path, signal)
     const root = await this.repositoryRootOf(policy, canonical, signal)
-    const pool = this.poolPath(root)
-    const poolTarget = await this.fs().resolve(pool, { signal })
     const pathTarget = await this.fs().resolve(canonical, { signal })
     const rootTarget = await this.fs().resolve(root, { signal })
 
     if (this.fs().processPath(pathTarget) === this.fs().processPath(rootTarget)) {
       throw new WorktreeError('WORKTREE_MAIN_CHECKOUT', 'refusing to remove the repository main checkout')
     }
-    if (!this.fs().contains(poolTarget, pathTarget)) {
-      throw new WorktreeError('WORKTREE_EXTERNAL', `refusing to remove a checkout outside pool (${pool})`)
-    }
+    // No pool containment gate: legacy-layout worktrees (pre unified pool) must stay removable.
 
     const branch = await this.branchOf(policy, canonical, signal)
     const dirty = await this.dirtyCountOf(policy, canonical, signal)
@@ -556,7 +558,7 @@ export default class WorktreeManagerService extends TypertRemoteService {
       throw new WorktreeError('WORKTREE_DIRTY', `${canonical} has ${dirty} uncommitted change(s); pass force to discard them`)
     }
 
-    const registry = await this.registry(root)
+    const registry = await this.registry()
     const children = registry.worktrees.filter(item => item.parentPath === canonical)
     if (children.length > 0 && !force) {
       throw new WorktreeError(
@@ -576,7 +578,7 @@ export default class WorktreeManagerService extends TypertRemoteService {
     }
     await run(root, ['worktree', 'prune'], [0, 1])
 
-    await this.registryMutateFile(root, file => {
+    await this.registryMutateFile(file => {
       const unpinned = (file.unpinnedPaths ?? []).filter(p => p !== canonical)
       const next = file.worktrees.filter(item => item.path !== canonical)
       if (force) {
@@ -647,7 +649,7 @@ export default class WorktreeManagerService extends TypertRemoteService {
       {
         name: 'worktree_create',
         description:
-          'Create a new managed git worktree under .agents/worktrees/<branch> and register it as a DSH Workspace without leaving the current checkout unless enter is true.',
+          'Create a new managed git worktree under the shared plugin pool directory and register it as a DSH Workspace without leaving the current checkout unless enter is true.',
         parameters: {
           type: 'object',
           properties: {
@@ -723,11 +725,11 @@ export default class WorktreeManagerService extends TypertRemoteService {
       {
         name: 'worktree_remove',
         description:
-          'Remove a pool-managed git worktree under .agents/worktrees. Uncommitted changes or child worktrees require force: true.',
+          'Remove a pool-managed git worktree (unified plugin pool or legacy checkout location). Uncommitted changes or child worktrees require force: true.',
         parameters: {
           type: 'object',
           properties: {
-            path: { type: 'string', description: 'Checkout path under .agents/worktrees.' },
+            path: { type: 'string', description: 'Worktree checkout path.' },
             force: { type: 'boolean', description: 'Discard uncommitted changes and detach child worktrees.' },
           },
           required: ['path'],
@@ -767,16 +769,16 @@ export default class WorktreeManagerService extends TypertRemoteService {
   }
 
   // ---------------------------------------------------------------------
-  // Registry store (<repo>/.agents/worktrees/worktree-manager.json)
+  // Registry store (<poolRoot>/worktree-manager.json, shared by all repos)
   // ---------------------------------------------------------------------
 
-  private registryPath(root: string): string {
-    return `${this.poolPath(root)}/${REGISTRY_FILE}`
+  private registryPath(): string {
+    return `${poolRoot()}/${REGISTRY_FILE}`
   }
 
-  private async registry(root: string): Promise<RegistryFile> {
+  private async registry(): Promise<RegistryFile> {
     try {
-      const target = await this.fs().resolve(this.registryPath(root), { signal: undefined })
+      const target = await this.fs().resolve(this.registryPath(), { signal: undefined })
       const text = await this.fs().readText(target, undefined)
       const parsed = JSON.parse(text) as RegistryFile
       if (parsed && Array.isArray(parsed.worktrees)) {
@@ -792,19 +794,19 @@ export default class WorktreeManagerService extends TypertRemoteService {
     return { version: REGISTRY_VERSION, unpinnedPaths: [], worktrees: [] }
   }
 
-  private async registryMutateFile(root: string, mutate: (file: RegistryFile) => RegistryFile): Promise<void> {
-    const current = await this.registry(root)
+  private async registryMutateFile(mutate: (file: RegistryFile) => RegistryFile): Promise<void> {
+    const current = await this.registry()
     const next = mutate({
       version: REGISTRY_VERSION,
       unpinnedPaths: [...(current.unpinnedPaths ?? [])],
       worktrees: current.worktrees.map(item => ({ ...item })),
     })
-    const filePath = this.registryPath(root)
+    const filePath = this.registryPath()
     // Written via the full-access helper script: `.agents/` is harness-managed and
     // rejected by `fs().writeText` under workspace-write sandbox policies.
     await this.runArgv(
       { mode: 'danger-full-access' },
-      root,
+      pathDirname(pathDirname(filePath)),
       ['node', '--input-type=module', '-e', PREPARE_POOL_SCRIPT, pathDirname(filePath), filePath, `${JSON.stringify(next, null, 2)}\n`],
       COMMAND_TIMEOUT_MS,
       undefined,
@@ -903,8 +905,11 @@ export default class WorktreeManagerService extends TypertRemoteService {
       )
   }
 
-  private poolPath(root: string): string {
-    return `${root.replace(/\/+$/, '')}/${POOL_DIR}`
+  private async poolPath(root: string): Promise<string> {
+    const safe = pathBasename(root).replace(/[^A-Za-z0-9._-]+/g, '-') || 'repo'
+    const digest = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(root))
+    const hash = Array.from(new Uint8Array(digest).slice(0, 4), b => b.toString(16).padStart(2, '0')).join('')
+    return `${poolRoot()}/${safe}-${hash}`
   }
 
   private async tryRepositoryRootOf(
@@ -980,10 +985,10 @@ export default class WorktreeManagerService extends TypertRemoteService {
   ): Promise<WorktreeRow[]> {
     const run = this.gitRunner(policy, signal)
     const listed = await run(root, ['worktree', 'list', '--porcelain', '-z'])
-    const registry = await this.registry(root)
+    const registry = await this.registry()
     const unpinned = new Set(registry.unpinnedPaths ?? [])
     const rootTarget = await this.fs().resolve(root, { signal })
-    const poolTarget = await this.fs().resolve(this.poolPath(root), { signal })
+    const poolTarget = await this.fs().resolve(await this.poolPath(root), { signal })
 
     const parsedBlocks: Array<{
       canonicalPath: string

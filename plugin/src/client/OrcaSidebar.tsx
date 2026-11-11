@@ -360,7 +360,7 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
       const p = normalizePath(ws.path)
       if (!seen.has(p)) { seen.add(p); allKnownPaths.push(p) }
     }
-    // Deepest path first so `.agents/worktrees/<branch>` wins over its parent `<repo>`!
+    // Deepest path first so a pool worktree wins over its parent `<repo>`!
     allKnownPaths.sort((a, b) => b.length - a.length)
 
     const sessionExplicitWsPath = new Map<string, string>()

@@ -129,6 +129,8 @@ function makeHostStubs(initialWorkspaces) {
 
 test('WorktreeManagerService end-to-end: SRC descriptors, multi-repo overview, lineage create, pin, workspace sync, safe remove', async () => {
   const tempRoot = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-orca-wt-test-')))
+  // Unified pool must live outside the plugin install dir during tests.
+  process.env.DSH_WORKTREE_POOL = join(tempRoot, 'unified-pool')
   try {
     const repoDir = join(tempRoot, 'qiz-pg-penta-server')
     execFileSync('git', ['init', '-b', 'develop', repoDir])
@@ -214,6 +216,7 @@ test('WorktreeManagerService end-to-end: SRC descriptors, multi-repo overview, l
     const created1 = await svc.create(repoDir, 'feat_gen_task', 'origin/release/v1', repoDir)
     assert.equal(created1.ok, true)
     assert.equal(created1.value.branch, 'feat_gen_task')
+    assert.ok(created1.value.path.startsWith(process.env.DSH_WORKTREE_POOL), 'worktree must live in the unified pool')
     assert.ok(created1.value.workspaceId, 'created worktree must auto-register a DSH Workspace')
     assert.equal(readFileSync(join(created1.value.path, 'RELEASE.md'), 'utf8'), 'v1\n')
 
@@ -256,8 +259,9 @@ test('WorktreeManagerService end-to-end: SRC descriptors, multi-repo overview, l
     assert.equal(finalOverview.ok, true)
     assert.equal(finalOverview.value.repos[0].rows.length, 1)
 
-    // 8. Verify Agent tools registered cleanly.
+    // 8. Verify Agent tools registered cleanly + central registry file in pool root.
     assert.equal(stubs.registeredTools.size, 6)
+    assert.equal(JSON.parse(readFileSync(join(process.env.DSH_WORKTREE_POOL, 'worktree-manager.json'), 'utf8')).version, 2)
   } finally {
     rmSync(tempRoot, { recursive: true, force: true })
   }
