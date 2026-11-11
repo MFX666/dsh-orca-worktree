@@ -4,9 +4,10 @@
  * Hierarchy:
  * 1. Git Repository Group (`📁 repo-name` + hover `⌄ ••• +`)
  *    └── Worktree Branch Row (`● branch_name` + `[chats]` + `★` + hover `+ •••`)
- *          ├── Expandable Conversation sub-rows (when multi-chat or toggled)
+ *          ├── Expandable Conversation sub-rows (spinner while running, plain when ended)
  *          └── Orca Lineage Capsule (`[ ⑂ N | ● running ● idle ⌄ ]`)
- *                └── Indented Child Worktree Rows (18px per level)
+ *                └── Indented Child Worktree Rows (18px per level; registry lineage
+ *                    or physical path nesting derived by the host)
  * 2. Non-Git Folder Workspaces (registered folders that are not Git checkouts)
  * 3. Ungrouped Sessions (fallback so zero conversations are ever stranded)
  * @module dsh-worktree-plugin/client/OrcaSidebar
@@ -136,6 +137,13 @@ function sessionLabel(s: SessionSummaryLike, t: Translate): string {
   if (s.blank) return t('wt.unnamedChat')
   const text = (s.displayTitle ?? s.title ?? '').trim()
   return text.length > 0 ? text : t('wt.untitledChat')
+}
+
+/** Conversation rows keep the stock DSH idle look (no marker): spinner while running, warn dot while awaiting the user. */
+function ChatMarker({ state }: { state: 'running' | 'pending' | 'idle' }): ReactElement | null {
+  if (state === 'running') return <span className="owt-loading" aria-hidden />
+  if (state === 'pending') return <span className="owt-mini-dot" data-tone="warn" aria-hidden />
+  return null
 }
 
 export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
@@ -765,7 +773,7 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
                       props.openSessionMenu(chat.id, label, { x: event.clientX, y: event.clientY })
                     }}
                   >
-                    <span className="owt-mini-dot" data-tone={chatSt === 'pending' ? 'warn' : 'ok'} aria-hidden />
+                    <ChatMarker state={chatSt} />
                     <span className="owt-chat-title">{label}</span>
                     {!chat.blank && (
                       <span className="owt-hover-actions" onClick={event => { event.stopPropagation() }}>
@@ -1081,7 +1089,7 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
                         props.openSessionMenu(chat.id, label, { x: event.clientX, y: event.clientY })
                       }}
                     >
-                      <span className="owt-dot" data-status={st} aria-hidden />
+                      <ChatMarker state={st} />
                       <span className="owt-wt-branch">{label}</span>
                     </div>
                   )
@@ -1116,7 +1124,7 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
                     props.openSessionMenu(chat.id, label, { x: event.clientX, y: event.clientY })
                   }}
                 >
-                  <span className="owt-dot" data-status={st} aria-hidden />
+                  <ChatMarker state={st} />
                   <span className="owt-wt-branch">{label}</span>
                 </div>
               )

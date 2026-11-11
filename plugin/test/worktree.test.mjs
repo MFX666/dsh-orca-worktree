@@ -238,6 +238,26 @@ test('WorktreeManagerService end-to-end: SRC descriptors, multi-repo overview, l
     assert.equal(genRow.pinned, true)
     assert.equal(subRow.parentPath, genRow.path)
 
+    // 4b. Physical-nesting fallback: a checkout created outside the plugin
+    // registry (like the native DSH worktree tool) still nests under the
+    // worktree physically containing it.
+    const manualPath = join(repoDir, '.agents/worktrees/manual_native')
+    execFileSync('git', ['-C', repoDir, 'worktree', 'add', '-b', 'manual_native', manualPath])
+    const nested = await svc.overview(true)
+    assert.equal(nested.ok, true)
+    const nestedRows = nested.value.repos[0].rows
+    assert.equal(nestedRows.length, 4)
+    const manualRow = nestedRows.find(r => r.branch === 'manual_native')
+    assert.equal(manualRow.parentPath, repoDir)
+
+    // 4c. A physically nested child blocks parent removal even without a registry entry.
+    const manualLeaf = join(manualPath, '.agents/worktrees/manual_leaf')
+    execFileSync('mkdir', ['-p', join(manualPath, '.agents/worktrees')])
+    execFileSync('git', ['-C', repoDir, 'worktree', 'add', '-b', 'manual_leaf', manualLeaf])
+    const blockedByPhysical = await svc.remove(manualPath, false)
+    assert.equal(blockedByPhysical.ok, false)
+    assert.equal(blockedByPhysical.code, 'WORKTREE_HAS_CHILDREN')
+
     // 5. Removing parent without force is blocked by WORKTREE_HAS_CHILDREN!
     const blockedByChild = await svc.remove(genRow.path, false)
     assert.equal(blockedByChild.ok, false)
@@ -255,6 +275,8 @@ test('WorktreeManagerService end-to-end: SRC descriptors, multi-repo overview, l
     const removedGen = await svc.remove(genRow.path, false)
     assert.equal(removedGen.ok, true)
 
+    execFileSync('git', ['-C', repoDir, 'worktree', 'remove', '--force', manualLeaf])
+    execFileSync('git', ['-C', repoDir, 'worktree', 'remove', '--force', manualPath])
     const finalOverview = await svc.overview(true)
     assert.equal(finalOverview.ok, true)
     assert.equal(finalOverview.value.repos[0].rows.length, 1)
