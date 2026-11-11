@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Git worktrees",
+    "description": "Orca-style repository and worktree sidebar tree: click a branch to chat, expand multi-session lists, star branches, nest child worktrees, and manage via agent tools."
+  }
+}

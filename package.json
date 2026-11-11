@@ -1,0 +1,9 @@
+{
+  "name": "dsh-orca-worktree-monorepo",
+  "private": true,
+  "description": "Orca-style Git worktree & conversation sidebar plugin for DeepSeek Harness",
+  "scripts": {
+    "build": "pnpm --dir plugin build",
+    "test": "node --test plugin/test/worktree.test.mjs"
+  }
+}

@@ -1,0 +1,6 @@
+node_modules/
+lib/
+.tsc-out/
+.agents/
+*.log
+.DS_Store

@@ -1,0 +1,9 @@
+# Bundle layer for dsh-worktree-plugin. Referenced by package.json
+# `dsh.bundle.patch`; applied when a profile lists this package.
+#
+# Adds one Host row: the worktree-manager service (list / create / enter /
+# remove worktrees + registry) and its agent tools, plus the web UI panel.
+- insert:
+    - id: worktree-manager
+      name: dsh-worktree-plugin
+      config: {}
