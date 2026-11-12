@@ -143,6 +143,25 @@ export function IconRefresh({ size = 13, spinning = false }: { size?: number; sp
   )
 }
 
+/** Whitespace toggle glyph: horizontal compress arrows. */
+export function IconWhitespace({ size = 13.5 }: { size?: number }): ReactElement {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      width={size}
+      height={size}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.4}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M6 5.5 3.5 8 6 10.5M10 5.5 12.5 8 10 10.5M3.5 8h9" />
+    </svg>
+  )
+}
+
 /** Push glyph: arrow up out of a tray. */
 export function IconPush({ size = 13, spinning = false }: { size?: number; spinning?: boolean }): ReactElement {
   return (

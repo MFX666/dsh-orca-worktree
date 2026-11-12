@@ -1248,6 +1248,11 @@ const CSS = `
   transition: background 120ms ease, color 120ms ease;
 }
 
+.owt-gp-iconbtn[data-active="true"] {
+  color: var(--owt-gp-blue);
+  background: color-mix(in srgb, var(--owt-gp-blue) 12%, transparent);
+}
+
 .owt-gp-iconbtn:hover:not(:disabled) {
   background: var(--owt-gp-hover);
   color: var(--dsw-alias-label-primary);
@@ -1883,6 +1888,26 @@ const CSS = `
 
 .owt-gp-tr--del {
   background: color-mix(in srgb, var(--owt-gp-red) 10%, transparent);
+}
+
+/* Intra-line highlight: the exact half-line that changed inside a paired add/del row. */
+.owt-gp-tr--add .owt-gp-inline-chg {
+  background: color-mix(in srgb, var(--owt-gp-green) 32%, transparent);
+  border-radius: 2px;
+}
+
+.owt-gp-tr--del .owt-gp-inline-chg {
+  background: color-mix(in srgb, var(--owt-gp-red) 32%, transparent);
+  border-radius: 2px;
+}
+
+/* Dot marking rows whose status letter says content is already staged. */
+.owt-gp-staged-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--owt-gp-blue);
+  flex-shrink: 0;
 }
 
 .owt-gp-tr--del .owt-gp-td-num {

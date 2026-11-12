@@ -517,10 +517,17 @@ export default class WorktreeManagerService extends TypertRemoteService {
   async diff(
     path: string,
     file?: string | undefined,
+    ignoreWhitespace?: boolean | undefined,
     signal?: AbortSignal,
   ): Promise<WorktreeEnvelope<WorktreeDiffValue>> {
     try {
-      const value = await this.diffInternal({ mode: 'danger-full-access' }, path, signal, file)
+      const value = await this.diffInternal(
+        { mode: 'danger-full-access' },
+        path,
+        signal,
+        file,
+        ignoreWhitespace === true,
+      )
       return ok(value)
     } catch (error) {
       return fail(error)
@@ -1024,14 +1031,16 @@ export default class WorktreeManagerService extends TypertRemoteService {
     maxChars: number,
     signal: AbortSignal | undefined,
     onlyFile?: string,
+    ignoreWhitespace?: boolean,
   ): Promise<{ diff: string; truncated: boolean }> {
     void signal
+    const wsFlag = ignoreWhitespace === true ? ['--ignore-all-space'] : []
     if (onlyFile !== undefined && onlyFile.length > 0) {
       if (onlyFile.startsWith('-')) throw new WorktreeError('WORKTREE_DIFF_FAILED', 'invalid file path')
       const entry = changes.find(c => c.file === onlyFile)
       const res = entry?.untracked
         ? await run(canonical, ['diff', '--no-color', '--no-index', '--', '/dev/null', onlyFile], [0, 1], true).catch(() => ({ stdout: '', exitCode: 0, lossy: false }))
-        : await run(canonical, ['diff', '--no-color', '--no-ext-diff', 'HEAD', '--', onlyFile], [0, 128], true).catch(() => ({ stdout: '', exitCode: 128, lossy: false }))
+        : await run(canonical, ['diff', '--no-color', '--no-ext-diff', ...wsFlag, 'HEAD', '--', onlyFile], [0, 128], true).catch(() => ({ stdout: '', exitCode: 128, lossy: false }))
       const truncated = Boolean(res.lossy) || res.stdout.length > maxChars
       return { diff: truncated ? res.stdout.slice(0, maxChars) : res.stdout, truncated }
     }
@@ -1082,7 +1091,7 @@ export default class WorktreeManagerService extends TypertRemoteService {
     // Pass 1: tracked non-noisy files first so real source code always gets budget.
     const trackedMain = await run(
       canonical,
-      ['diff', '--no-color', '--no-ext-diff', 'HEAD', '--', '.', ...NOISY_DIFF_PATHSPECS],
+      ['diff', '--no-color', '--no-ext-diff', ...wsFlag, 'HEAD', '--', '.', ...NOISY_DIFF_PATHSPECS],
       [0, 128],
       true,
     ).catch(() => ({ stdout: '', exitCode: 128, lossy: false }))
@@ -1090,7 +1099,7 @@ export default class WorktreeManagerService extends TypertRemoteService {
       // Unborn HEAD (0 commits in repo): fall back to staged diff (`--cached`).
       const stagedOnly = await run(
         canonical,
-        ['diff', '--no-color', '--no-ext-diff', '--cached', '--', '.', ...NOISY_DIFF_PATHSPECS],
+        ['diff', '--no-color', '--no-ext-diff', ...wsFlag, '--cached', '--', '.', ...NOISY_DIFF_PATHSPECS],
         [0, 128],
         true,
       ).catch(() => ({ stdout: '', exitCode: 128, lossy: false }))
@@ -1129,7 +1138,7 @@ export default class WorktreeManagerService extends TypertRemoteService {
         }
         const one = await run(
           canonical,
-          ['diff', '--no-color', '--no-ext-diff', 'HEAD', '--', noisy.file],
+          ['diff', '--no-color', '--no-ext-diff', ...wsFlag, 'HEAD', '--', noisy.file],
           [0, 128],
           true,
         ).catch(() => ({ stdout: '', exitCode: 128, lossy: false }))
@@ -1146,12 +1155,13 @@ export default class WorktreeManagerService extends TypertRemoteService {
     path: string,
     signal?: AbortSignal,
     onlyFile?: string,
+    ignoreWhitespace?: boolean,
   ): Promise<WorktreeDiffValue> {
     const canonical = await this.canonicalWorktreePath(policy, path, signal)
     const run = this.gitRunner(policy, signal)
     const branch = (await this.branchOf(policy, canonical, signal)) ?? 'detached'
     const changes = await this.changesOf(run, canonical, signal)
-    const { diff, truncated } = await this.diffTextOf(run, canonical, changes, MAX_DIFF_CHARS, signal, onlyFile)
+    const { diff, truncated } = await this.diffTextOf(run, canonical, changes, MAX_DIFF_CHARS, signal, onlyFile, ignoreWhitespace)
     return { path: canonical, branch, changes, diff, truncated }
   }
 

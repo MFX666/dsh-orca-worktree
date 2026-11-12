@@ -14,6 +14,7 @@
   },
   "files": [
     "lib/index.js",
+    "lib/diffParser.js",
     "lib/client.js",
     "lib/client.js.map",
     "cordis.patch.yml",

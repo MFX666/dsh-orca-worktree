@@ -13,7 +13,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
 import type { WorktreeChangeRow, WorktreeDiffValue, WorktreeStatusValue } from '../protocol.ts'
 import type { WorktreeApi } from './api.ts'
-import { changeLetter, parseStructuredDiff, type ParsedFileDiff } from './diffParser.ts'
+import { changeLetter, parseStructuredDiff, type DiffLineRow, type ParsedFileDiff } from './diffParser.ts'
+import type { ReactNode } from 'react'
 import {
   IconCheck,
   IconChevron,
@@ -22,6 +23,7 @@ import {
   IconGitBranch,
   IconPush,
   IconRefresh,
+  IconWhitespace,
   IconSparkle,
 } from './icons.tsx'
 
@@ -123,6 +125,7 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
   const [selectedFiles, setSelectedFiles] = useState<ReadonlySet<string>>(() => new Set())
   const [activeFile, setActiveFile] = useState<string | null>(null)
   const [viewMode, setViewMode] = useState<'single' | 'all'>('single')
+  const [ignoreWs, setIgnoreWs] = useState(false)
   const [collapsedDirs, setCollapsedDirs] = useState<ReadonlySet<string>>(() => new Set())
   const [collapsedCards, setCollapsedCards] = useState<ReadonlySet<string>>(() => new Set())
   const [extraParsed, setExtraParsed] = useState<ReadonlyMap<string, ParsedFileDiff>>(() => new Map())
@@ -145,7 +148,7 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
       setError(undefined)
       try {
         const [nextDiff, nextStatus] = await Promise.all([
-          api.diff(targetPath, signal),
+          api.diff(targetPath, signal, undefined, ignoreWs),
           api.status(targetPath, signal).catch(() => null),
         ])
         if (signal.aborted) return
@@ -170,7 +173,7 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
         }
       }
     },
-    [api],
+    [api, ignoreWs],
   )
 
   useEffect(() => {
@@ -216,7 +219,7 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
     const controller = new AbortController()
     setLoadingFile(activeFile)
     api
-      .diff(path, controller.signal, activeFile)
+      .diff(path, controller.signal, activeFile, ignoreWs)
       .then(single => {
         if (controller.signal.aborted) return
         const singleParsed = parseStructuredDiff(single.diff)
@@ -234,7 +237,7 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
         if (!controller.signal.aborted) setLoadingFile(curr => (curr === activeFile ? null : curr))
       })
     return () => controller.abort()
-  }, [activeFile, api, diff, parsedMap, path])
+  }, [activeFile, api, diff, ignoreWs, parsedMap, path])
 
   const groups = useMemo(
     () => (diff !== null ? buildGroups(diff.changes, parsedMap) : []),
@@ -376,6 +379,25 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
   const someChecked = selectedFiles.size > 0 && !allChecked
   const canCommit = !busy && !suggesting && selectedFiles.size > 0 && msg.trim().length > 0
 
+  const renderCode = (row: DiffLineRow): ReactNode => {
+    const code = row.code
+    const spans = row.spans
+    if (spans === undefined || spans.length === 0) return code.length > 0 ? code : ' '
+    const nodes: ReactNode[] = []
+    let pos = 0
+    spans.forEach((span, idx) => {
+      if (span.start > pos) nodes.push(<span key={`p${idx}`}>{code.slice(pos, span.start)}</span>)
+      nodes.push(
+        <span key={`c${idx}`} className="owt-gp-inline-chg">
+          {code.slice(span.start, span.end)}
+        </span>,
+      )
+      pos = span.end
+    })
+    if (pos < code.length) nodes.push(<span key="tail">{code.slice(pos)}</span>)
+    return nodes
+  }
+
   const renderDiffCard = (change: WorktreeChangeRow, lineLimit: number): ReactElement => {
     const parsed = parsedMap.get(change.file)
     const letter = changeLetter(change)
@@ -447,7 +469,7 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
                           <td className="owt-gp-td-num">{row.oldNo ?? ''}</td>
                           <td className="owt-gp-td-num">{row.newNo ?? ''}</td>
                           <td className="owt-gp-td-sign">{row.sign}</td>
-                          <td className="owt-gp-td-code">{row.code || ' '}</td>
+                          <td className="owt-gp-td-code">{renderCode(row)}</td>
                         </tr>
                       )
                     })}
@@ -657,6 +679,7 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
                             {add > 0 && <span className="owt-gp-add">+{add}</span>}
                             {del > 0 && <span className="owt-gp-del">−{del}</span>}
                           </span>
+                          {change.staged && <span className="owt-gp-staged-dot" title={t('dialog.commit.staged')} />}
                           <span className="owt-gp-badge" data-kind={letter}>
                             {letter}
                           </span>
@@ -707,6 +730,17 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
                 {t('dialog.commit.modeAll')}
               </button>
             </div>
+            <button
+              type="button"
+              className="owt-gp-iconbtn"
+              data-active={ignoreWs}
+              title={t('dialog.commit.ignoreWs')}
+              aria-label={t('dialog.commit.ignoreWs')}
+              aria-pressed={ignoreWs}
+              onClick={() => setIgnoreWs(v => !v)}
+            >
+              <IconWhitespace size={13.5} />
+            </button>
           </div>
         )}
 

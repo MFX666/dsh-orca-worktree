@@ -85,4 +85,19 @@ const clientBundle: UserConfig = {
   },
 }
 
-export default [nodeLibrary, clientBundle]
+const diffParserBundle: UserConfig = {
+  // Node-safe copy of the pure parser so unit tests can import it without the
+  // browser handoff wrapper. The client bundle still inlines its own copy.
+  name: `${ID}/diffParser`,
+  entry: { diffParser: 'src/client/diffParser.ts' },
+  outDir: 'lib',
+  format: 'esm',
+  platform: 'node',
+  target: 'es2024',
+  fixedExtension: false,
+  dts: false,
+  sourcemap: false,
+  clean: false,
+}
+
+export default [nodeLibrary, clientBundle, diffParserBundle]

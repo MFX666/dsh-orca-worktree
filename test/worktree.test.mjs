@@ -484,6 +484,19 @@ test('WorktreeManagerService end-to-end: SRC descriptors, multi-repo overview, l
     assert.equal(afterPush.ok, true)
     assert.equal(afterPush.value.ahead, 0)
 
+    // 9d4. ignoreWhitespace drops whitespace-only edits from the diff text; staged rows carry the flag.
+    writeFileSync(join(repoDir, 'README.md'), 'hello changed  \n')
+    const wsDefault = await svc.diff(repoDir)
+    assert.ok(wsDefault.value.diff.includes('diff --git a/README.md'), 'whitespace-only edit appears by default')
+    const wsIgnored = await svc.diff(repoDir, undefined, true)
+    assert.equal(wsIgnored.ok, true)
+    assert.ok(!wsIgnored.value.diff.includes('diff --git a/README.md'), 'ignoreWhitespace must drop whitespace-only edits')
+    assert.equal(wsIgnored.value.changes.find(c => c.file === 'README.md').staged, false, 'unstaged row before git add')
+    execFileSync('git', ['-C', repoDir, 'add', 'README.md'])
+    const stagedDiff = await svc.diff(repoDir)
+    assert.equal(stagedDiff.value.changes.find(c => c.file === 'README.md').staged, true, 'staged row after git add')
+    execFileSync('git', ['-C', repoDir, 'checkout', 'HEAD', '--', 'README.md'])
+
     // 9e. Suggestion streams through the mounted llm runtime and returns the cleaned message.
     const llmCalls = []
     ctx.provide('llm', {

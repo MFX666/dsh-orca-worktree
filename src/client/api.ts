@@ -32,7 +32,7 @@ export interface WorktreeApi {
   setPinned(path: string, pinned: boolean, signal?: AbortSignal): Promise<WorktreePinValue>
   remove(path: string, force: boolean, deleteRemote?: boolean, signal?: AbortSignal): Promise<WorktreeRemoveValue>
   status(path: string, signal?: AbortSignal): Promise<WorktreeStatusValue>
-  diff(path: string, signal?: AbortSignal, file?: string): Promise<WorktreeDiffValue>
+  diff(path: string, signal?: AbortSignal, file?: string, ignoreWhitespace?: boolean): Promise<WorktreeDiffValue>
   commit(path: string, message: string, files: readonly string[], signal?: AbortSignal): Promise<WorktreeCommitValue>
   push(path: string, signal?: AbortSignal): Promise<WorktreePushValue>
   suggestCommitMessage(path: string, signal?: AbortSignal): Promise<WorktreeSuggestMessageValue>
@@ -75,7 +75,16 @@ export function createWorktreeApi(ctx: ClientContext): WorktreeApi {
     setPinned: (path, pinned, signal) => call('setPinned', { path, pinned }, signal),
     remove: (path, force, deleteRemote, signal) => call('remove', { path, force, deleteRemote }, signal),
     status: (path, signal) => call('status', { path }, signal),
-    diff: (path, signal, file) => call('diff', file !== undefined ? { path, file } : { path }, signal),
+    diff: (path, signal, file, ignoreWhitespace) =>
+      call(
+        'diff',
+        {
+          path,
+          ...(file !== undefined ? { file } : {}),
+          ...(ignoreWhitespace === true ? { ignoreWhitespace: true } : {}),
+        },
+        signal,
+      ),
     commit: (path, message, files, signal) => call('commit', { path, message, files }, signal),
     push: (path, signal) => call('push', { path }, signal),
     suggestCommitMessage: (path, signal) => call('suggestCommitMessage', { path }, signal),
