@@ -1,9 +1,67 @@
 {
-  "name": "dsh-orca-worktree-monorepo",
-  "private": true,
-  "description": "Orca-style Git worktree & conversation sidebar plugin for DeepSeek Harness",
+  "name": "dsh-worktree-plugin",
+  "version": "0.2.2",
+  "description": "Git worktree management panel and agent tools for the deepseek-harness web UI (list / create / enter / remove, Orca-style tree)",
+  "type": "module",
+  "license": "MIT",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/client.js",
+    "lib/client.js.map",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-context-menu",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-settings-general",
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-ui-workspace"
+      ]
+    }
+  },
   "scripts": {
-    "build": "pnpm --dir plugin build",
-    "test": "node --test plugin/test/worktree.test.mjs"
-  }
+    "build": "rm -rf lib .tsc-out && tsc -p tsconfig.build.json && tsdown",
+    "watch": "tsdown --watch"
+  },
+  "dependencies": {
+    "@deepseek-ai/cordis": "file:vendor/cordis",
+    "@deepseek-ai/dsh-typert-protocol": "file:vendor/dsh-typert-protocol"
+  },
+  "peerDependencies": {
+    "react": "^18.2.0"
+  },
+  "devDependencies": {
+    "@deepseek-ai/dsh-client-connection": "link:../deepseek-harness/packages/client/connection",
+    "@deepseek-ai/dsh-client-locale": "link:../deepseek-harness/packages/client/locale",
+    "@deepseek-ai/dsh-client-runtime": "link:../deepseek-harness/packages/client/runtime",
+    "@deepseek-ai/dsh-client-ui-conversation": "link:../deepseek-harness/packages/client/ui-conversation",
+    "@deepseek-ai/dsh-client-ui-layout": "link:../deepseek-harness/packages/client/ui-layout",
+    "@deepseek-ai/dsh-client-ui-slots": "link:../deepseek-harness/packages/client/ui-slots",
+    "@deepseek-ai/dsh-fs": "link:../deepseek-harness/packages/fs/fs",
+    "@types/react": "~18.3.1",
+    "react": "^18.2.0",
+    "tsdown": "^0.22.2",
+    "typescript": "^5.9.2"
+  },
+  "packageManager": "pnpm@11.17.0+sha512.cca3cea332ad254bb84145f966d19f4879615210346fc92c79a047f23a0d7b3cca3c3792f0076ba1f1831d277efbcf0a9119b31a9a60eca7fb3d6231f331ef72"
 }
