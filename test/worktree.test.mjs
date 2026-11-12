@@ -190,6 +190,7 @@ test('WorktreeManagerService end-to-end: SRC descriptors, multi-repo overview, l
       'diff',
       'ensureWorkspace',
       'overview',
+      'push',
       'remove',
       'setPinned',
       'status',
@@ -473,6 +474,15 @@ test('WorktreeManagerService end-to-end: SRC descriptors, multi-repo overview, l
     assert.equal(renameEntry?.oldFile, 'README.md', 'rename row must carry its source path')
     assert.ok(renameDiff.value.diff.includes('rename from README.md'), 'rename header must survive in the diff text')
     execFileSync('git', ['-C', repoDir, 'mv', 'RENAMED.md', 'README.md'])
+
+    // 9d3. Push publishes the branch to its upstream and clears the ahead count.
+    const pushed = await svc.push(repoDir)
+    assert.equal(pushed.ok, true)
+    assert.equal(pushed.value.branch, 'develop')
+    assert.equal(pushed.value.upstream, 'origin/develop')
+    const afterPush = await svc.status(repoDir)
+    assert.equal(afterPush.ok, true)
+    assert.equal(afterPush.value.ahead, 0)
 
     // 9e. Suggestion streams through the mounted llm runtime and returns the cleaned message.
     const llmCalls = []

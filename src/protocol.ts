@@ -18,6 +18,7 @@ export type WorktreeErrorCode =
   | 'WORKTREE_TIMEOUT'
   | 'WORKTREE_DIFF_FAILED'
   | 'WORKTREE_COMMIT_FAILED'
+  | 'WORKTREE_PUSH_FAILED'
   | 'WORKTREE_LLM_UNAVAILABLE'
   | 'RPC_ERROR'
 
@@ -182,6 +183,14 @@ export interface WorktreeCommitValue {
   readonly commit: string
   readonly summary: string
   readonly branch: string
+}
+
+/** `push` outcome. */
+export interface WorktreePushValue {
+  readonly path: string
+  readonly branch: string
+  /** Upstream ref after the push (e.g. `origin/develop`), set when `-u` established it. */
+  readonly upstream: string
 }
 
 /** `suggestCommitMessage` outcome. */

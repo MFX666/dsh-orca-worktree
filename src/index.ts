@@ -48,8 +48,9 @@ import type {
   WorktreeEnvelope,
   WorktreeErrorCode,
   WorktreeListValue,
-  WorktreeOverviewValue,
   WorktreePinValue,
+  WorktreePushValue,
+  WorktreeOverviewValue,
   WorktreeRemoveValue,
   WorktreeRepoGroup,
   WorktreeRow,
@@ -536,6 +537,17 @@ export default class WorktreeManagerService extends TypertRemoteService {
   ): Promise<WorktreeEnvelope<WorktreeCommitValue>> {
     try {
       const value = await this.commitInternal({ mode: 'danger-full-access' }, path, message, files, signal)
+      return ok(value)
+    } catch (error) {
+      return fail(error)
+    }
+  }
+
+  /** Push the current branch to its upstream, establishing one via `-u` when missing. */
+  @Remote('push')
+  async push(path: string, signal?: AbortSignal): Promise<WorktreeEnvelope<WorktreePushValue>> {
+    try {
+      const value = await this.pushInternal({ mode: 'danger-full-access' }, path, signal)
       return ok(value)
     } catch (error) {
       return fail(error)
@@ -1179,6 +1191,34 @@ export default class WorktreeManagerService extends TypertRemoteService {
       summary: summary.stdout.trim(),
       branch,
     }
+  }
+
+  private async pushInternal(
+    policy: { mode: string },
+    path: string,
+    signal?: AbortSignal,
+  ): Promise<WorktreePushValue> {
+    const canonical = await this.canonicalWorktreePath(policy, path, signal)
+    const run = this.gitRunner(policy, signal)
+    const branch = (await this.branchOf(policy, canonical, signal)) ?? 'detached'
+    const upstreamRes = await run(canonical, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}'], [0, 1, 128])
+    const existingUpstream = upstreamRes.exitCode === 0 ? upstreamRes.stdout.trim() : ''
+    if (existingUpstream.length > 0) {
+      // Plain push; a non-fast-forward surfaces the remote's rejection verbatim.
+      await run(canonical, ['push']).catch(error => {
+        throw new WorktreeError('WORKTREE_PUSH_FAILED', error instanceof Error ? error.message : String(error))
+      })
+      return { path: canonical, branch, upstream: existingUpstream }
+    }
+    const remotes = await run(canonical, ['remote'], [0, 128]).catch(() => ({ stdout: '', exitCode: 128 }))
+    const remote = remotes.stdout.split('\n').map(l => l.trim()).find(l => l.length > 0)
+    if (remote === undefined) {
+      throw new WorktreeError('WORKTREE_PUSH_FAILED', 'no remote configured for this checkout')
+    }
+    await run(canonical, ['push', '-u', remote, branch]).catch(error => {
+      throw new WorktreeError('WORKTREE_PUSH_FAILED', error instanceof Error ? error.message : String(error))
+    })
+    return { path: canonical, branch, upstream: `${remote}/${branch}` }
   }
 
   private async suggestCommitMessageInternal(

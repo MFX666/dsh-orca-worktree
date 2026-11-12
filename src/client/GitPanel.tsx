@@ -20,6 +20,7 @@ import {
   IconFile,
   IconFolder,
   IconGitBranch,
+  IconPush,
   IconRefresh,
   IconSparkle,
 } from './icons.tsx'
@@ -115,6 +116,7 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
   const [msg, setMsg] = useState('')
   const [suggesting, setSuggesting] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [pushing, setPushing] = useState(false)
   const [error, setError] = useState<string | undefined>(undefined)
   const [banner, setBanner] = useState<string | undefined>(undefined)
 
@@ -311,6 +313,22 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
     }
   }, [api, busy, path, suggesting])
 
+  const handlePush = useCallback(async () => {
+    if (path === undefined || pushing || busy || loading || refreshing) return
+    setPushing(true)
+    setError(undefined)
+    try {
+      const pushed = await api.push(path)
+      setBanner(t('notice.pushed', { branch: pushed.branch, upstream: pushed.upstream }))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setPushing(false)
+      // Reload so ahead/behind and the upstream pill reflect the push.
+      void loadWorkspaceDiff(path, false)
+    }
+  }, [api, busy, loadWorkspaceDiff, loading, path, pushing, refreshing, t])
+
   const submit = useCallback(async () => {
     if (path === undefined || busy || suggesting || diff === null) return
     if (msg.trim().length === 0 || selectedFiles.size === 0) return
@@ -466,6 +484,16 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
               </span>
             )}
           </div>
+          <button
+            type="button"
+            className="owt-gp-iconbtn"
+            title={upstream === undefined ? t('dialog.commit.pushNoUpstream') : t('dialog.commit.push', { count: ahead })}
+            aria-label={t('dialog.commit.push', { count: ahead })}
+            disabled={loading || refreshing || busy || pushing || (upstream !== undefined && ahead === 0)}
+            onClick={() => { void handlePush() }}
+          >
+            <IconPush size={13.5} spinning={pushing} />
+          </button>
           <button
             type="button"
             className="owt-gp-iconbtn"

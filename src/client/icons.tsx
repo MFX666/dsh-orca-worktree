@@ -143,6 +143,26 @@ export function IconRefresh({ size = 13, spinning = false }: { size?: number; sp
   )
 }
 
+/** Push glyph: arrow up out of a tray. */
+export function IconPush({ size = 13, spinning = false }: { size?: number; spinning?: boolean }): ReactElement {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      width={size}
+      height={size}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.4}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      style={spinning ? { animation: 'owt-spin 0.8s linear infinite' } : undefined}
+      aria-hidden
+    >
+      <path d="M8 9.75V2.5M5.25 5.25 8 2.5l2.75 2.75M2.75 10.5v2.75h10.5V10.5" />
+    </svg>
+  )
+}
+
 /** AI sparkle glyph for the commit-message generator button. */
 export function IconSparkle({ size = 14 }: { size?: number }): ReactElement {
   return (

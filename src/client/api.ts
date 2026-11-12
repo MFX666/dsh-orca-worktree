@@ -14,6 +14,7 @@ import type {
   WorktreeEnvelope,
   WorktreeOverviewValue,
   WorktreePinValue,
+  WorktreePushValue,
   WorktreeRemoveValue,
   WorktreeStatusValue,
   WorktreeSuggestMessageValue,
@@ -33,6 +34,7 @@ export interface WorktreeApi {
   status(path: string, signal?: AbortSignal): Promise<WorktreeStatusValue>
   diff(path: string, signal?: AbortSignal, file?: string): Promise<WorktreeDiffValue>
   commit(path: string, message: string, files: readonly string[], signal?: AbortSignal): Promise<WorktreeCommitValue>
+  push(path: string, signal?: AbortSignal): Promise<WorktreePushValue>
   suggestCommitMessage(path: string, signal?: AbortSignal): Promise<WorktreeSuggestMessageValue>
 }
 
@@ -75,6 +77,7 @@ export function createWorktreeApi(ctx: ClientContext): WorktreeApi {
     status: (path, signal) => call('status', { path }, signal),
     diff: (path, signal, file) => call('diff', file !== undefined ? { path, file } : { path }, signal),
     commit: (path, message, files, signal) => call('commit', { path, message, files }, signal),
+    push: (path, signal) => call('push', { path }, signal),
     suggestCommitMessage: (path, signal) => call('suggestCommitMessage', { path }, signal),
   }
 }
