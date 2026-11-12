@@ -155,6 +155,8 @@ export interface WorktreeEnterValue {
 export interface WorktreeChangeRow {
   /** Path relative to the checkout root (rename destination when applicable). */
   readonly file: string
+  /** Rename/copy source path relative to the checkout root, when the row is an R/C entry. */
+  readonly oldFile?: string
   /** Two-char XY porcelain code, e.g. `M ` (staged modify), ` M`, `??`, `R `. */
   readonly status: string
   readonly staged: boolean

@@ -129,9 +129,15 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
   const diffScrollRef = useRef<HTMLDivElement | null>(null)
   const cardRefs = useRef<Map<string, HTMLElement>>(new Map())
   const attemptedFilesRef = useRef<Set<string>>(new Set())
+  const loadCtrlRef = useRef<AbortController | null>(null)
 
   const loadWorkspaceDiff = useCallback(
-    async (targetPath: string, isInitial: boolean, signal?: AbortSignal) => {
+    async (targetPath: string, isInitial: boolean) => {
+      // Abort any in-flight load first so a slow refresh can never overwrite a newer one.
+      loadCtrlRef.current?.abort()
+      const controller = new AbortController()
+      loadCtrlRef.current = controller
+      const signal = controller.signal
       if (isInitial) setLoading(true)
       else setRefreshing(true)
       setError(undefined)
@@ -140,7 +146,7 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
           api.diff(targetPath, signal),
           api.status(targetPath, signal).catch(() => null),
         ])
-        if (signal?.aborted) return
+        if (signal.aborted) return
         attemptedFilesRef.current.clear()
         setExtraParsed(new Map())
         setDiff(nextDiff)
@@ -153,10 +159,10 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
         })
         setActiveFile(prev => (prev !== null && allPaths.includes(prev) ? prev : (allPaths[0] ?? null)))
       } catch (err) {
-        if (signal?.aborted) return
+        if (signal.aborted) return
         setError(err instanceof Error ? err.message : String(err))
       } finally {
-        if (!signal?.aborted) {
+        if (!signal.aborted) {
           setLoading(false)
           setRefreshing(false)
         }
@@ -177,9 +183,8 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
     setBanner(undefined)
     setCollapsedDirs(new Set())
     setCollapsedCards(new Set())
-    const controller = new AbortController()
-    void loadWorkspaceDiff(path, true, controller.signal)
-    return () => controller.abort()
+    void loadWorkspaceDiff(path, true)
+    return () => loadCtrlRef.current?.abort()
   }, [loadWorkspaceDiff, path])
 
   useEffect(() => {
@@ -381,8 +386,11 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
           <span className="owt-gp-badge" data-kind={letter}>
             {letter}
           </span>
-          <span className="owt-gp-card-path" title={change.file}>
+          <span className="owt-gp-card-path" title={change.oldFile !== undefined ? `${change.oldFile} → ${change.file}` : change.file}>
             {dirPrefix !== '' && <span className="owt-gp-card-dir">{dirPrefix}</span>}
+            {change.oldFile !== undefined && (
+              <span className="owt-gp-oldname">{change.oldFile.slice(change.oldFile.lastIndexOf('/') + 1)} → </span>
+            )}
             <span className="owt-gp-card-name">{baseName}</span>
           </span>
           <span className="owt-gp-card-stats">
@@ -586,9 +594,19 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
                         <div
                           key={change.file}
                           className="owt-gp-file-row"
+                          role="button"
+                          tabIndex={0}
                           data-active={isSelected}
                           data-nested={group.dir !== ''}
+                          title={change.oldFile !== undefined ? `${change.oldFile} → ${change.file}` : change.file}
                           onClick={() => handleSelectFileRow(change.file)}
+                          onKeyDown={event => {
+                            if (event.target !== event.currentTarget) return
+                            if (event.key === 'Enter' || event.key === ' ') {
+                              event.preventDefault()
+                              handleSelectFileRow(change.file)
+                            }
+                          }}
                         >
                           <input
                             type="checkbox"
@@ -601,6 +619,9 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
                           <span className="owt-gp-file-icon">
                             <IconFile size={13} />
                           </span>
+                          {change.oldFile !== undefined && (
+                            <span className="owt-gp-oldname">{change.oldFile.slice(change.oldFile.lastIndexOf('/') + 1)} →</span>
+                          )}
                           <span className="owt-gp-file-name" title={change.file}>
                             {baseName}
                           </span>

@@ -465,6 +465,15 @@ test('WorktreeManagerService end-to-end: SRC descriptors, multi-repo overview, l
     const lastSubject = execFileSync('git', ['-C', repoDir, 'log', '-1', '--pretty=%s'], { encoding: 'utf8' }).trim()
     assert.equal(lastSubject, 'docs: extend readme, add NEW')
 
+    // 9d2. Rename rows keep the porcelain source path as oldFile.
+    execFileSync('git', ['-C', repoDir, 'mv', 'README.md', 'RENAMED.md'])
+    const renameDiff = await svc.diff(repoDir)
+    assert.equal(renameDiff.ok, true)
+    const renameEntry = renameDiff.value.changes.find(c => c.file === 'RENAMED.md')
+    assert.equal(renameEntry?.oldFile, 'README.md', 'rename row must carry its source path')
+    assert.ok(renameDiff.value.diff.includes('rename from README.md'), 'rename header must survive in the diff text')
+    execFileSync('git', ['-C', repoDir, 'mv', 'RENAMED.md', 'README.md'])
+
     // 9e. Suggestion streams through the mounted llm runtime and returns the cleaned message.
     const llmCalls = []
     ctx.provide('llm', {

@@ -968,16 +968,33 @@ export default class WorktreeManagerService extends TypertRemoteService {
       const x = token[0]!
       const y = token[1]!
       if (x === ' ' && y === ' ') continue
-      if (x === 'R' || x === 'C') i++
       const file = token.slice(3)
       const stat = statsByFile.get(file)
-      changes.push({
+      const row: {
+        file: string
+        status: string
+        staged: boolean
+        untracked: boolean
+        add?: number
+        del?: number
+        oldFile?: string
+      } = {
         file,
         status: token.slice(0, 2),
         staged: x !== ' ' && x !== '?',
         untracked: x === '?' && y === '?',
-        ...(stat !== undefined ? { add: stat.add, del: stat.del } : {}),
-      })
+      }
+      if (stat !== undefined) {
+        row.add = stat.add
+        row.del = stat.del
+      }
+      if (x === 'R' || x === 'C') {
+        // Porcelain -z rename entry: the next token is the source path.
+        const oldFile = tokens[i + 1] ?? ''
+        i++
+        if (oldFile.length > 0) row.oldFile = oldFile
+      }
+      changes.push(row)
     }
     return changes
   }

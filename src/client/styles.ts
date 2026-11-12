@@ -1552,6 +1552,11 @@ const CSS = `
   font-weight: 600;
 }
 
+.owt-gp-file-row:focus-visible {
+  outline: 1.5px solid var(--owt-gp-blue);
+  outline-offset: -1.5px;
+}
+
 .owt-gp-file-name {
   flex: 1;
   min-width: 0;
@@ -1560,6 +1565,17 @@ const CSS = `
   white-space: nowrap;
   font-family: var(--owt-font-code);
   font-size: 12px;
+}
+
+/* Rename source half (old → new), muted so the destination stays primary. */
+.owt-gp-oldname {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 1;
+  font-family: var(--owt-font-code);
+  font-size: 11.5px;
+  color: var(--dsw-alias-label-tertiary, var(--dsw-alias-label-secondary));
 }
 
 .owt-gp-file-stats {
