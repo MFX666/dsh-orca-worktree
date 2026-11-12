@@ -142,3 +142,38 @@ export function IconRefresh({ size = 13, spinning = false }: { size?: number; sp
     </svg>
   )
 }
+
+/** AI sparkle glyph for the commit-message generator button. */
+export function IconSparkle({ size = 14 }: { size?: number }): ReactElement {
+  return (
+    <svg viewBox="0 0 16 16" width={size} height={size} fill="currentColor" stroke="none" aria-hidden>
+      <path d="M8 1.6c.5 2.6 1.6 3.7 4.2 4.2-2.6.5-3.7 1.6-4.2 4.2-.5-2.6-1.6-3.7-4.2-4.2C6.4 5.3 7.5 4.2 8 1.6z" />
+      <path d="M12.6 9.4c.3 1.5.9 2.1 2.4 2.4-1.5.3-2.1.9-2.4 2.4-.3-1.5-.9-2.1-2.4-2.4 1.5-.3 2.1-.9 2.4-2.4z" opacity={0.75} />
+    </svg>
+  )
+}
+
+export function IconFolder({ size = 13 }: { size?: number }): ReactElement {
+  return (
+    <svg viewBox="0 0 16 16" width={size} height={size} fill="none" stroke="currentColor" strokeWidth={1.3} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M1.75 4.25a1.25 1.25 0 0 1 1.25-1.25h3.1l1.35 1.5H13a1.25 1.25 0 0 1 1.25 1.25v6a1.25 1.25 0 0 1-1.25 1.25H3a1.25 1.25 0 0 1-1.25-1.25v-7.5Z" />
+    </svg>
+  )
+}
+
+export function IconFile({ size = 13 }: { size?: number }): ReactElement {
+  return (
+    <svg viewBox="0 0 16 16" width={size} height={size} fill="none" stroke="currentColor" strokeWidth={1.3} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M4 2.25h5.2L12.5 5.5v8.25a1 1 0 0 1-1 1h-7.5a1 1 0 0 1-1-1V3.25a1 1 0 0 1 1-1Z" />
+      <path d="M9 2.25v3.25h3.5" />
+    </svg>
+  )
+}
+
+export function IconCheck({ size = 13 }: { size?: number }): ReactElement {
+  return (
+    <svg viewBox="0 0 16 16" width={size} height={size} fill="none" stroke="currentColor" strokeWidth={1.65} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="m3.25 8.25 3.1 3.1 6.4-6.5" />
+    </svg>
+  )
+}

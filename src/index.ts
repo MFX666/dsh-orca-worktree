@@ -6,7 +6,8 @@
  *   take plain JSON arguments (no `agent` lookup parameter), so sidebar calls
  *   succeed even before any Session is opened.
  * - Agent tools (`worktree_list`, `worktree_create`, `worktree_enter`,
- *   `worktree_status`, `worktree_remove`, `worktree_pin`) call the same
+ *   `worktree_status`, `worktree_diff`, `worktree_commit`, `worktree_remove`,
+ *   `worktree_pin`) call the same
  *   service methods under the calling Session's sandbox policy.
  * - Every created/opened worktree is registered in `ctx.workspaceRegistry`,
  *   allowing native DSH Conversations (`startSession` / `openSession`) to bind
@@ -38,7 +39,10 @@ import type {
   ArchivedBranchRecord,
   WorktreeArchivedMetaValue,
   WorktreeBranchesValue,
+  WorktreeChangeRow,
+  WorktreeCommitValue,
   WorktreeCreateValue,
+  WorktreeDiffValue,
   WorktreeEnsureWorkspaceValue,
   WorktreeEnterValue,
   WorktreeEnvelope,
@@ -50,6 +54,7 @@ import type {
   WorktreeRepoGroup,
   WorktreeRow,
   WorktreeStatusValue,
+  WorktreeSuggestMessageValue,
 } from './protocol.ts'
 
 // Unified pool: every repo's worktrees live under ~/.dsh/dsh-orca-worktrees/<repo-key>/.
@@ -70,6 +75,20 @@ const COMMAND_TIMEOUT_MS = 120_000
 const REMOVE_TIMEOUT_MS = 600_000
 const COMMAND_GRACE_MS = 5_000
 const MAX_OUTPUT_BYTES = 1 << 20
+const MAX_DIFF_STDOUT_BYTES = 4 << 20
+const MAX_DIFF_CHARS = 768_000
+const PER_FILE_DIFF_CHARS = 96_000
+const SUGGEST_DIFF_CHARS = 48_000
+const SUGGEST_TIMEOUT_MS = 60_000
+
+const NOISY_DIFF_PATHSPECS = [
+  ':(exclude)*.map',
+  ':(exclude)*.min.js',
+  ':(exclude)*.min.css',
+  ':(exclude)pnpm-lock.yaml',
+  ':(exclude)package-lock.json',
+  ':(exclude)yarn.lock',
+] as const
 
 const PREPARE_POOL_SCRIPT = `
 import fs from 'node:fs/promises';
@@ -157,6 +176,20 @@ interface ToolsService {
   register(definition: unknown): () => void
 }
 
+/** Structural slice of `@deepseek-ai/dsh-llm` LlmRuntime used for commit-message suggestions. */
+interface LlmRuntimeLike {
+  listProviders(): ReadonlyArray<{ id: string }>
+  listModels(provider: string): Promise<ReadonlyArray<{ id: string }>>
+  stream(options: {
+    provider: string
+    model: string
+    system?: string
+    messages: ReadonlyArray<{ role: 'user'; content: ReadonlyArray<{ type: 'text'; text: string }> }>
+    maxTokens?: number
+    signal?: AbortSignal
+  }): AsyncIterable<{ type: string; text?: string }>
+}
+
 interface HostServices {
   subprocess: SubprocessService
   sandbox?: SandboxService
@@ -166,6 +199,7 @@ interface HostServices {
   sessionPersistence?: SessionPersistenceService
   sessions?: LiveSessionsService
   tools?: ToolsService
+  llm?: LlmRuntimeLike
 }
 
 interface RegistryEntry {
@@ -471,6 +505,48 @@ export default class WorktreeManagerService extends TypertRemoteService {
   async status(path: string, signal?: AbortSignal): Promise<WorktreeEnvelope<WorktreeStatusValue>> {
     try {
       const value = await this.statusInternal({ mode: 'danger-full-access' }, path, signal)
+      return ok(value)
+    } catch (error) {
+      return fail(error)
+    }
+  }
+
+  /** Working-tree changes + combined (or single-file) diff text. */
+  @Remote('diff')
+  async diff(
+    path: string,
+    file?: string | undefined,
+    signal?: AbortSignal,
+  ): Promise<WorktreeEnvelope<WorktreeDiffValue>> {
+    try {
+      const value = await this.diffInternal({ mode: 'danger-full-access' }, path, signal, file)
+      return ok(value)
+    } catch (error) {
+      return fail(error)
+    }
+  }
+
+  /** Commit the working tree with `message`, staging exactly `files` when provided. */
+  @Remote('commit')
+  async commit(
+    path: string,
+    message: string,
+    files: readonly string[] | undefined,
+    signal?: AbortSignal,
+  ): Promise<WorktreeEnvelope<WorktreeCommitValue>> {
+    try {
+      const value = await this.commitInternal({ mode: 'danger-full-access' }, path, message, files, signal)
+      return ok(value)
+    } catch (error) {
+      return fail(error)
+    }
+  }
+
+  /** Draft one commit message from the working-tree diff via the mounted LLM provider. */
+  @Remote('suggestCommitMessage')
+  async suggestCommitMessage(path: string, signal?: AbortSignal): Promise<WorktreeEnvelope<WorktreeSuggestMessageValue>> {
+    try {
+      const value = await this.suggestCommitMessageInternal({ mode: 'danger-full-access' }, path, signal)
       return ok(value)
     } catch (error) {
       return fail(error)
@@ -846,6 +922,319 @@ export default class WorktreeManagerService extends TypertRemoteService {
     return { path: canonical, branch: branch ?? 'detached', dirtyCount, ahead, behind }
   }
 
+  /** Parse `git status --porcelain -z` (with `--untracked-files=all`) + `--numstat` into change rows. */
+  private async changesOf(
+    run: (cwd: string, args: readonly string[], allowedExitCodes?: readonly number[], allowLossy?: boolean) => Promise<{ stdout: string; exitCode: number; lossy?: boolean }>,
+    canonical: string,
+    signal: AbortSignal | undefined,
+  ): Promise<WorktreeChangeRow[]> {
+    const [st, numstat] = await Promise.all([
+      run(canonical, ['status', '--porcelain', '-z', '--untracked-files=all'], [0, 128], true),
+      run(canonical, ['diff', '--numstat', '-z', 'HEAD'], [0, 128], true).catch(() => ({ stdout: '', exitCode: 128 })),
+    ])
+    void signal
+
+    const statsByFile = new Map<string, { add: number; del: number }>()
+    if (numstat.exitCode === 0 && numstat.stdout.length > 0) {
+      const parts = numstat.stdout.split('\0')
+      for (let i = 0; i < parts.length; i++) {
+        const seg = parts[i]!
+        if (seg.length === 0) continue
+        const t1 = seg.indexOf('\t')
+        const t2 = t1 >= 0 ? seg.indexOf('\t', t1 + 1) : -1
+        if (t1 < 0 || t2 < 0) continue
+        const addRaw = seg.slice(0, t1)
+        const delRaw = seg.slice(t1 + 1, t2)
+        let filePath = seg.slice(t2 + 1)
+        if (filePath.length === 0) {
+          // Rename/copy entry in `-z` mode: `add\tdel\t\0oldPath\0newPath\0`
+          filePath = parts[i + 2] ?? parts[i + 1] ?? ''
+          i += 2
+        }
+        if (filePath.length > 0 && addRaw !== '-' && delRaw !== '-') {
+          statsByFile.set(filePath, {
+            add: Number.parseInt(addRaw, 10) || 0,
+            del: Number.parseInt(delRaw, 10) || 0,
+          })
+        }
+      }
+    }
+
+    const changes: WorktreeChangeRow[] = []
+    const tokens = st.stdout.split('\0')
+    for (let i = 0; i < tokens.length; i++) {
+      const token = tokens[i]!
+      if (token.length < 4) continue
+      const x = token[0]!
+      const y = token[1]!
+      if (x === ' ' && y === ' ') continue
+      if (x === 'R' || x === 'C') i++
+      const file = token.slice(3)
+      const stat = statsByFile.get(file)
+      changes.push({
+        file,
+        status: token.slice(0, 2),
+        staged: x !== ' ' && x !== '?',
+        untracked: x === '?' && y === '?',
+        ...(stat !== undefined ? { add: stat.add, del: stat.del } : {}),
+      })
+    }
+    return changes
+  }
+
+  /**
+   * Combined (or single-file) working-tree diff text:
+   * - Single-file mode (`onlyFile` set): fetches just that file up to `maxChars`, even `.map` / lockfiles.
+   * - Overview mode: excludes noisy build maps/lockfiles in the first pass and caps each file at
+   *   `PER_FILE_DIFF_CHARS` so one large bundle never starves source files alphabetically after it!
+   */
+  private async diffTextOf(
+    run: (cwd: string, args: readonly string[], allowedExitCodes?: readonly number[], allowLossy?: boolean) => Promise<{ stdout: string; exitCode: number; lossy?: boolean }>,
+    canonical: string,
+    changes: readonly WorktreeChangeRow[],
+    maxChars: number,
+    signal: AbortSignal | undefined,
+    onlyFile?: string,
+  ): Promise<{ diff: string; truncated: boolean }> {
+    void signal
+    if (onlyFile !== undefined && onlyFile.length > 0) {
+      if (onlyFile.startsWith('-')) throw new WorktreeError('WORKTREE_DIFF_FAILED', 'invalid file path')
+      const entry = changes.find(c => c.file === onlyFile)
+      const res = entry?.untracked
+        ? await run(canonical, ['diff', '--no-color', '--no-index', '--', '/dev/null', onlyFile], [0, 1], true).catch(() => ({ stdout: '', exitCode: 0, lossy: false }))
+        : await run(canonical, ['diff', '--no-color', '--no-ext-diff', 'HEAD', '--', onlyFile], [0, 128], true).catch(() => ({ stdout: '', exitCode: 128, lossy: false }))
+      const truncated = Boolean(res.lossy) || res.stdout.length > maxChars
+      return { diff: truncated ? res.stdout.slice(0, maxChars) : res.stdout, truncated }
+    }
+
+    const parts: string[] = []
+    let total = 0
+    let truncated = false
+    const perFileCap = Math.min(PER_FILE_DIFF_CHARS, maxChars)
+
+    const appendSection = (section: string): boolean => {
+      if (total >= maxChars) {
+        truncated = true
+        return false
+      }
+      let chunk = section
+      if (chunk.length > perFileCap) {
+        // Trim cleanly at a newline boundary so the last rendered line isn't half-broken.
+        const nl = chunk.lastIndexOf('\n', perFileCap)
+        chunk = nl > 0 ? `${chunk.slice(0, nl + 1)}` : chunk.slice(0, perFileCap)
+        truncated = true
+      }
+      if (chunk.length > maxChars - total) {
+        const nl = chunk.lastIndexOf('\n', maxChars - total)
+        chunk = nl > 0 ? chunk.slice(0, nl + 1) : chunk.slice(0, maxChars - total)
+        truncated = true
+      }
+      parts.push(chunk)
+      total += chunk.length
+      return total < maxChars
+    }
+
+    const appendMultiFileDiff = (raw: string, wasLossy: boolean): void => {
+      if (wasLossy) truncated = true
+      if (raw.length === 0) return
+      let start = 0
+      while (start < raw.length) {
+        const next = raw.indexOf('\ndiff --git ', start)
+        const section = next >= 0 ? raw.slice(start, next + 1) : raw.slice(start)
+        if (!appendSection(section)) break
+        if (next < 0) break
+        start = next + 1
+      }
+    }
+
+    const isNoisy = (file: string): boolean =>
+      /\.(map|lock)$|(^|\/)(pnpm-lock\.yaml|package-lock\.json|yarn\.lock|bun\.lockb?)$|\.min\.(js|css)$/.test(file)
+
+    // Pass 1: tracked non-noisy files first so real source code always gets budget.
+    const trackedMain = await run(
+      canonical,
+      ['diff', '--no-color', '--no-ext-diff', 'HEAD', '--', '.', ...NOISY_DIFF_PATHSPECS],
+      [0, 128],
+      true,
+    ).catch(() => ({ stdout: '', exitCode: 128, lossy: false }))
+    if (trackedMain.exitCode === 128) {
+      // Unborn HEAD (0 commits in repo): fall back to staged diff (`--cached`).
+      const stagedOnly = await run(
+        canonical,
+        ['diff', '--no-color', '--no-ext-diff', '--cached', '--', '.', ...NOISY_DIFF_PATHSPECS],
+        [0, 128],
+        true,
+      ).catch(() => ({ stdout: '', exitCode: 128, lossy: false }))
+      appendMultiFileDiff(stagedOnly.stdout, Boolean(stagedOnly.lossy))
+    } else {
+      appendMultiFileDiff(trackedMain.stdout, Boolean(trackedMain.lossy))
+    }
+
+    // Pass 2: untracked non-noisy files, then untracked noisy files if budget remains.
+    const untrackedChanges = [
+      ...changes.filter(c => c.untracked && !isNoisy(c.file)),
+      ...changes.filter(c => c.untracked && isNoisy(c.file)),
+    ]
+    for (const change of untrackedChanges) {
+      if (total >= maxChars) {
+        truncated = true
+        break
+      }
+      const one = await run(
+        canonical,
+        ['diff', '--no-color', '--no-index', '--', '/dev/null', change.file],
+        [0, 1],
+        true,
+      ).catch(() => ({ stdout: '', exitCode: 0, lossy: false }))
+      if (one.lossy) truncated = true
+      if (one.stdout.length > 0 && !appendSection(one.stdout)) break
+    }
+
+    // Marking truncated when noisy tracked files were skipped lets the UI know lazy per-file fetch is available.
+    if (changes.some(c => !c.untracked && isNoisy(c.file))) {
+      // Do not pollute small diffs if budget remains: fetch noisy tracked files last when space allows.
+      for (const noisy of changes.filter(c => !c.untracked && isNoisy(c.file))) {
+        if (total >= maxChars) {
+          truncated = true
+          break
+        }
+        const one = await run(
+          canonical,
+          ['diff', '--no-color', '--no-ext-diff', 'HEAD', '--', noisy.file],
+          [0, 128],
+          true,
+        ).catch(() => ({ stdout: '', exitCode: 128, lossy: false }))
+        if (one.lossy) truncated = true
+        if (one.stdout.length > 0 && !appendSection(one.stdout)) break
+      }
+    }
+
+    return { diff: parts.join(''), truncated }
+  }
+
+  private async diffInternal(
+    policy: { mode: string },
+    path: string,
+    signal?: AbortSignal,
+    onlyFile?: string,
+  ): Promise<WorktreeDiffValue> {
+    const canonical = await this.canonicalWorktreePath(policy, path, signal)
+    const run = this.gitRunner(policy, signal)
+    const branch = (await this.branchOf(policy, canonical, signal)) ?? 'detached'
+    const changes = await this.changesOf(run, canonical, signal)
+    const { diff, truncated } = await this.diffTextOf(run, canonical, changes, MAX_DIFF_CHARS, signal, onlyFile)
+    return { path: canonical, branch, changes, diff, truncated }
+  }
+
+  private async commitInternal(
+    policy: { mode: string },
+    path: string,
+    message: string,
+    files: readonly string[] | undefined,
+    signal?: AbortSignal,
+  ): Promise<WorktreeCommitValue> {
+    const trimmed = message.replace(/^\s+|\s+$/g, '')
+    if (trimmed.length === 0) throw new WorktreeError('WORKTREE_COMMIT_FAILED', 'commit message is empty')
+    if (files !== undefined && (files.length === 0 || files.some(f => typeof f !== 'string' || f.length === 0 || f.startsWith('-')))) {
+      throw new WorktreeError('WORKTREE_COMMIT_FAILED', 'invalid file list')
+    }
+    const canonical = await this.canonicalWorktreePath(policy, path, signal)
+    const run = this.gitRunner(policy, signal)
+    if (files !== undefined) {
+      // Stage exactly the selected files (including untracked), then `--only` commits
+      // precisely them so pre-staged-but-unselected index content stays untouched.
+      await run(canonical, ['add', '--', ...files]).catch(error => {
+        throw new WorktreeError('WORKTREE_COMMIT_FAILED', error instanceof Error ? error.message : String(error))
+      })
+    }
+    try {
+      await run(canonical, ['commit', '-m', trimmed, ...(files !== undefined ? ['--only', '--', ...files] : [])])
+    } catch (error) {
+      const text = error instanceof Error ? error.message : String(error)
+      throw new WorktreeError('WORKTREE_COMMIT_FAILED', text)
+    }
+    const short = await run(canonical, ['rev-parse', '--short=7', 'HEAD'], [0, 128])
+    const summary = await run(canonical, ['log', '-1', '--pretty=%s'], [0, 128])
+    const branch = (await this.branchOf(policy, canonical, signal)) ?? 'detached'
+    return {
+      path: canonical,
+      commit: short.stdout.trim(),
+      summary: summary.stdout.trim(),
+      branch,
+    }
+  }
+
+  private async suggestCommitMessageInternal(
+    policy: { mode: string },
+    path: string,
+    signal?: AbortSignal,
+  ): Promise<WorktreeSuggestMessageValue> {
+    const canonical = await this.canonicalWorktreePath(policy, path, signal)
+    const run = this.gitRunner(policy, signal)
+    const branch = (await this.branchOf(policy, canonical, signal)) ?? 'detached'
+    const changes = await this.changesOf(run, canonical, signal)
+    if (changes.length === 0) {
+      throw new WorktreeError('WORKTREE_COMMIT_FAILED', 'no working-tree changes to describe')
+    }
+    const { diff } = await this.diffTextOf(run, canonical, changes, SUGGEST_DIFF_CHARS, signal)
+    const log = await run(canonical, ['log', '--oneline', '-8'], [0, 128]).catch(() => ({ stdout: '', exitCode: 128 }))
+
+    const llm = this.host().llm
+    if (llm === undefined) {
+      throw new WorktreeError('WORKTREE_LLM_UNAVAILABLE', 'llm service is not mounted in this DSH profile')
+    }
+    const providers = llm.listProviders()
+    const provider = providers[0]?.id
+    if (provider === undefined) {
+      throw new WorktreeError('WORKTREE_LLM_UNAVAILABLE', 'no LLM provider adapter is registered')
+    }
+    const models = await llm.listModels(provider).catch(() => [])
+    const model = models[0]?.id
+    if (model === undefined) {
+      throw new WorktreeError('WORKTREE_LLM_UNAVAILABLE', `provider ${provider} advertises no models`)
+    }
+
+    const signals: AbortSignal[] = [AbortSignal.timeout(SUGGEST_TIMEOUT_MS)]
+    if (signal !== undefined) signals.push(signal)
+    const llmSignal = AbortSignal.any(signals)
+    const recent = log.stdout.trim()
+    const prompt = [
+      `Branch: ${branch}`,
+      recent.length > 0 ? `Recent commit subjects (match their style/language):\n${recent}` : 'No commit history yet.',
+      'Write one git commit message for the staged-and-unstaged diff below.',
+      'Rules: first line = imperative subject <= 72 chars, no trailing period; then one blank line;',
+      'body <= 5 bullet lines explaining the why; reply with the raw message only, no quotes, no fences, no explanations.',
+      '--- DIFF ---',
+      diff,
+    ].join('\n')
+    let text = ''
+    try {
+      for await (const chunk of llm.stream({
+        provider,
+        model,
+        system: 'You are a precise git commit-message writer. Output only the commit message text.',
+        messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }],
+        maxTokens: 512,
+        signal: llmSignal,
+      })) {
+        if (chunk.type === 'text-delta' && typeof chunk.text === 'string') text += chunk.text
+        if (llmSignal.aborted) break
+      }
+    } catch (error) {
+      const messageText = error instanceof Error ? error.message : String(error)
+      throw new WorktreeError('WORKTREE_LLM_UNAVAILABLE', `commit message generation failed: ${messageText}`)
+    }
+    const cleaned = text
+      .trim()
+      .replace(/^```[a-z]*\s*\n?/, '')
+      .replace(/\n?```\s*$/, '')
+      .trim()
+    if (cleaned.length === 0) {
+      throw new WorktreeError('WORKTREE_LLM_UNAVAILABLE', 'model returned an empty commit message')
+    }
+    return { path: canonical, message: cleaned, provider, model }
+  }
+
   // ---------------------------------------------------------------------
   // Agent tools (one operation, two callers)
   // ---------------------------------------------------------------------
@@ -924,6 +1313,50 @@ export default class WorktreeManagerService extends TypertRemoteService {
         async execute(args, exec) {
           if (typeof args.path !== 'string' || args.path.length === 0) throw new Error('path is required')
           return JSON.parse(JSON.stringify(await self.statusInternal(self.policy(exec.agent), args.path, exec.signal)))
+        },
+      },
+      {
+        name: 'worktree_diff',
+        description:
+          'Show uncommitted changes of a git checkout: per-file status rows (staged / unstaged / untracked) plus the combined or single-file diff text.',
+        parameters: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'Checkout path.' },
+            file: { type: 'string', description: 'Optional relative file path to fetch only that file diff.' },
+          },
+          required: ['path'],
+        },
+        async execute(args, exec) {
+          if (typeof args.path !== 'string' || args.path.length === 0) throw new Error('path is required')
+          const file = typeof args.file === 'string' && args.file.length > 0 ? args.file : undefined
+          return JSON.parse(JSON.stringify(await self.diffInternal(self.policy(exec.agent), args.path, exec.signal, file)))
+        },
+      },
+      {
+        name: 'worktree_commit',
+        description:
+          'Commit changes in a git checkout. Stages exactly `files` (may include untracked paths) and commits them with `message`; omit `files` to commit the index as-is.',
+        parameters: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'Checkout path.' },
+            message: { type: 'string', description: 'Commit message (first line is the subject).' },
+            files: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Paths (relative to the checkout) to stage and commit; omitted commits the whole index.',
+            },
+          },
+          required: ['path', 'message'],
+        },
+        async execute(args, exec) {
+          if (typeof args.path !== 'string' || args.path.length === 0) throw new Error('path is required')
+          if (typeof args.message !== 'string' || args.message.trim().length === 0) throw new Error('message is required')
+          const files = Array.isArray(args.files) ? args.files.filter((f): f is string => typeof f === 'string') : undefined
+          return JSON.parse(
+            JSON.stringify(await self.commitInternal(self.policy(exec.agent), args.path, args.message, files, exec.signal)),
+          )
         },
       },
       {
@@ -1222,6 +1655,7 @@ process.stdout.write(row && typeof row.payload === 'string' ? row.payload : '{}'
       tools: this.getService('tools'),
       sandbox: this.getService('sandbox'),
       sandboxPolicy: this.getService('sandboxPolicy'),
+      llm: this.getService('llm'),
     }
   }
 
@@ -1241,7 +1675,8 @@ process.stdout.write(row && typeof row.payload === 'string' ? row.payload : '{}'
     timeoutMs: number,
     signal: AbortSignal | undefined,
     allowedExitCodes: readonly number[] = [0],
-  ): Promise<{ stdout: string; exitCode: number }> {
+    allowLossy = false,
+  ): Promise<{ stdout: string; exitCode: number; lossy: boolean }> {
     const signals: AbortSignal[] = [AbortSignal.timeout(timeoutMs)]
     if (signal !== undefined) signals.push(signal)
     const timeoutSignal = AbortSignal.any(signals)
@@ -1253,13 +1688,14 @@ process.stdout.write(row && typeof row.payload === 'string' ? row.payload : '{}'
     }
     command = [await host.subprocess.resolveExecutable(command[0]!, undefined, timeoutSignal), ...command.slice(1)]
     timeoutSignal.throwIfAborted()
+    const stdoutCap = allowLossy ? MAX_DIFF_STDOUT_BYTES : MAX_OUTPUT_BYTES
     const child = host.subprocess.spawn({
       argv: command,
       cwd,
       env: { ...GIT_ENV, GIT_TERMINAL_PROMPT: '0', GIT_LFS_SKIP_SMUDGE: '1', GIT_NO_LAZY_FETCH: '1' },
       signal: timeoutSignal,
       graceMs: COMMAND_GRACE_MS,
-      stdio: { stdin: 'ignore', stdout: { maxBytes: MAX_OUTPUT_BYTES }, stderr: { maxBytes: MAX_OUTPUT_BYTES } },
+      stdio: { stdin: 'ignore', stdout: { maxBytes: stdoutCap }, stderr: { maxBytes: MAX_OUTPUT_BYTES } },
     })
     try {
       const outcome = await child.done
@@ -1270,8 +1706,8 @@ process.stdout.write(row && typeof row.payload === 'string' ? row.payload : '{}'
         if (timeoutSignal.aborted) throw new WorktreeError('WORKTREE_TIMEOUT', 'command timed out')
         throw new Error(`${argv.slice(0, 3).join(' ')} failed (${outcome.signal ?? outcome.exitCode}): ${stderr.text.trim()}`)
       }
-      if (stdout.lossy) throw new Error(`command output exceeds ${MAX_OUTPUT_BYTES} bytes`)
-      return { stdout: stdout.text, exitCode: outcome.exitCode }
+      if (stdout.lossy && !allowLossy) throw new Error(`command output exceeds ${stdoutCap} bytes`)
+      return { stdout: stdout.text, exitCode: outcome.exitCode, lossy: stdout.lossy }
     } finally {
       child.terminate()
       await child.waitForExit()
@@ -1279,7 +1715,7 @@ process.stdout.write(row && typeof row.payload === 'string' ? row.payload : '{}'
   }
 
   private gitRunner(policy: { mode: string }, signal: AbortSignal | undefined, timeoutMs = COMMAND_TIMEOUT_MS) {
-    return (cwd: string, args: readonly string[], allowedExitCodes: readonly number[] = [0]) =>
+    return (cwd: string, args: readonly string[], allowedExitCodes: readonly number[] = [0], allowLossy = false) =>
       this.runArgv(
         policy,
         cwd,
@@ -1287,6 +1723,7 @@ process.stdout.write(row && typeof row.payload === 'string' ? row.payload : '{}'
         timeoutMs,
         signal,
         allowedExitCodes,
+        allowLossy,
       )
   }
 

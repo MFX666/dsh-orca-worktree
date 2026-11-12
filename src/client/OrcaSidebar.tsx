@@ -12,7 +12,12 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent, type ReactElement } from 'react'
 import { createPortal } from 'react-dom'
-import type { WorktreeBranchesValue, WorktreeOverviewValue, WorktreeRepoGroup, WorktreeRow } from '../protocol.ts'
+import type {
+  WorktreeBranchesValue,
+  WorktreeOverviewValue,
+  WorktreeRepoGroup,
+  WorktreeRow,
+} from '../protocol.ts'
 import type { WorktreeApi } from './api.ts'
 import {
   IconChat,
@@ -125,6 +130,9 @@ const STORAGE_EXPANDED_CHATS = 'dsh.orcaWorktree.expandedChats.v1'
 /** Chat sub-lists longer than this collapse to the first rows; a toggle reveals the rest. */
 const CHAT_PREVIEW_LIMIT = 5
 
+/** Diff lines rendered inside the commit dialog; the rest is summarized. */
+const DIFF_RENDER_LIMIT = 4000
+
 function loadStoredSet(key: string): Set<string> {
   try {
     const raw = window.localStorage.getItem(key)
@@ -165,6 +173,21 @@ function formatCompactAge(updatedAt: number | undefined, nowMs: number, t: Trans
   if (hours < 24) return t('time.hour', { n: hours })
   const days = Math.floor(hours / 24)
   return t('time.day', { n: days })
+}
+
+/** Deepest worktree row whose checkout contains `path` (exact or ancestor). */
+function findRowForPath(overview: WorktreeOverviewValue | null, path: string): WorktreeRow | undefined {
+  if (overview === null) return undefined
+  const norm = normalizePath(path)
+  let best: WorktreeRow | undefined
+  for (const repo of overview.repos) {
+    for (const row of repo.rows) {
+      const rowNorm = normalizePath(row.path)
+      if (norm !== rowNorm && !norm.startsWith(`${rowNorm}/`)) continue
+      if (best === undefined || rowNorm.length > normalizePath(best.path).length) best = row
+    }
+  }
+  return best
 }
 
 function isMacPlatform(): boolean {
@@ -394,7 +417,14 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
 
   // Modal Escape listener.
   useEffect(() => {
-    if (createDialog === null && removeDialog === null && wsRenameDialog === null && wsDeleteDialog === null) return
+    if (
+      createDialog === null &&
+      removeDialog === null &&
+      wsRenameDialog === null &&
+      wsDeleteDialog === null
+    ) {
+      return
+    }
     const onKey = (event: KeyboardEvent) => {
       if (event.key === 'Escape' && !busy) {
         setCreateDialog(null)
@@ -435,6 +465,7 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
 
   const archivedSet = useMemo(() => new Set(workspaceSnap.archivedSessionIds), [workspaceSnap.archivedSessionIds])
   const pinnedSessionSet = useMemo(() => new Set(workspaceSnap.pinnedSessionIds), [workspaceSnap.pinnedSessionIds])
+
 
   /**
    * Long chat lists preview only the top rows (pinned chats sort first) until the
@@ -1134,6 +1165,7 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
     }
   }, [refreshOverview, startNewChatInWorktree])
 
+
   const renderedRepos = (overview?.repos ?? []).map(renderRepo).filter((node): node is ReactElement => node !== null)
 
   const filteredNonGit = nonGitWorkspaces.filter(ws => {
@@ -1702,6 +1734,7 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
           </div>,
           document.body,
         )}
+
     </div>
   )
 }

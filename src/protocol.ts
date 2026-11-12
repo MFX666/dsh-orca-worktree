@@ -16,6 +16,9 @@ export type WorktreeErrorCode =
   | 'WORKTREE_REMOVE_FAILED'
   | 'WORKTREE_NOT_A_REPO'
   | 'WORKTREE_TIMEOUT'
+  | 'WORKTREE_DIFF_FAILED'
+  | 'WORKTREE_COMMIT_FAILED'
+  | 'WORKTREE_LLM_UNAVAILABLE'
   | 'RPC_ERROR'
 
 export type WorktreeEnvelope<T> =
@@ -146,4 +149,43 @@ export interface WorktreeArchivedMetaValue {
 /** `enter` outcome. */
 export interface WorktreeEnterValue {
   readonly path: string
+}
+
+/** One changed file from `git status --porcelain -z` inside a checkout. */
+export interface WorktreeChangeRow {
+  /** Path relative to the checkout root (rename destination when applicable). */
+  readonly file: string
+  /** Two-char XY porcelain code, e.g. `M ` (staged modify), ` M`, `??`, `R `. */
+  readonly status: string
+  readonly staged: boolean
+  readonly untracked: boolean
+  readonly add?: number
+  readonly del?: number
+}
+
+/** `diff` outcome — combined working-tree view used by the commit dialog. */
+export interface WorktreeDiffValue {
+  readonly path: string
+  readonly branch: string
+  readonly changes: readonly WorktreeChangeRow[]
+  /** `git diff HEAD` plus per-file untracked diffs (`--no-index /dev/null <file>`). */
+  readonly diff: string
+  /** True when the combined diff exceeded the size cap and was cut short. */
+  readonly truncated: boolean
+}
+
+/** `commit` outcome. */
+export interface WorktreeCommitValue {
+  readonly path: string
+  readonly commit: string
+  readonly summary: string
+  readonly branch: string
+}
+
+/** `suggestCommitMessage` outcome. */
+export interface WorktreeSuggestMessageValue {
+  readonly path: string
+  readonly message: string
+  readonly provider: string
+  readonly model: string
 }

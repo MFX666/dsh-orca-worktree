@@ -12,6 +12,7 @@ import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type { WorktreeOverviewValue, WorktreeRow } from '../protocol.ts'
 import { createWorktreeApi, type WorktreeApi } from './api.ts'
 import { ArchivedSessionsSection } from './ArchivedSessionsSection.tsx'
+import { CommitPanel } from './GitPanel.tsx'
 import { IconCreate, IconRemove } from './icons.tsx'
 import { OrcaSidebar } from './OrcaSidebar.tsx'
 import { injectStyles, removeStyles } from './styles.ts'
@@ -86,6 +87,21 @@ export function apply(ctx: ClientContext): void {
   const slots = (ctx as unknown as { slots: SlotsFace }).slots
   const uiWorkspace = (ctx as unknown as { uiWorkspace: UiWorkspaceFace }).uiWorkspace
   const workspaces = (ctx as unknown as { workspaces: WorkspacesFace }).workspaces
+
+  // Git tab (review changes & commit) in the conversation view tab strip, next to 对话 / 轨迹 / AOCI.
+  slots.inject('conversation.view', () =>
+    slots.register(
+      {
+        name: 'conversation.view',
+        id: 'worktree-git',
+        order: 40,
+        label: () => t('view.gitTab'),
+        locale: NS,
+        inject: (sessionId: string) => ({ api, t, sessionId }),
+      },
+      CommitPanel,
+    ),
+  )
 
   // Fast cache so right-click / "..." context menus resolve immediately without git status timeout.
   let cachedOverview: WorktreeOverviewValue | null = null
