@@ -209,6 +209,43 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
   const [busy, setBusy] = useState(false)
   const [toast, setToast] = useState<ToastNotice | null>(null)
 
+  // `uiWorkspace.startSession` silently no-ops (`console.warn`) when the client
+  // workspaces store has not yet received a just-created workspace, so queue the
+  // start until the store lists the workspace (give up after 10s).
+  const [pendingStartWsId, setPendingStartWsId] = useState<string | null>(null)
+  const workspaceIdSetRef = useRef<ReadonlySet<string>>(new Set())
+  workspaceIdSetRef.current = useMemo(
+    () => new Set(workspaceSnap.items.map(item => item.workspaceId)),
+    [workspaceSnap.items],
+  )
+  const startSessionRef = useRef(props.startSession)
+  startSessionRef.current = props.startSession
+
+  const startSessionWhenReady = useCallback((workspaceId: string | undefined) => {
+    if (workspaceId === undefined) return
+    if (workspaceIdSetRef.current.has(workspaceId)) {
+      startSessionRef.current(workspaceId)
+      return
+    }
+    setPendingStartWsId(workspaceId)
+  }, [])
+
+  useEffect(() => {
+    if (pendingStartWsId === null) return
+    const requestedAt = Date.now()
+    const timer = window.setInterval(() => {
+      if (workspaceIdSetRef.current.has(pendingStartWsId)) {
+        window.clearInterval(timer)
+        setPendingStartWsId(null)
+        startSessionRef.current(pendingStartWsId)
+      } else if (Date.now() - requestedAt > 10_000) {
+        window.clearInterval(timer)
+        setPendingStartWsId(null)
+      }
+    }, 200)
+    return () => { window.clearInterval(timer) }
+  }, [pendingStartWsId])
+
   const rootRef = useRef<HTMLDivElement | null>(null)
   const searchInputRef = useRef<HTMLInputElement | null>(null)
   const composingRef = useRef(false)
@@ -296,7 +333,10 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
         setStaleHostHint(false)
         setBranchOptions(res)
         if (!userPickedFromRef.current) {
-          if (childSeed !== '' && (childSeed === 'HEAD' || res.localBranches.includes(childSeed) || res.remoteBranches.includes(childSeed))) {
+          if (childSeed !== '' && childSeed !== 'HEAD' && res.remoteBranches.includes(`origin/${childSeed}`)) {
+            // 派生子工作树优先取远程分支，保持基线与远程一致
+            setFromDraft(`origin/${childSeed}`)
+          } else if (childSeed !== '' && (childSeed === 'HEAD' || res.localBranches.includes(childSeed) || res.remoteBranches.includes(childSeed))) {
             setFromDraft(childSeed)
           } else {
             setFromDraft(res.defaultBase)
@@ -537,12 +577,12 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
       try {
         const wsId =
           row.workspaceId ?? (await api.ensureWorkspace(row.path, row.displayName ?? row.branch)).workspaceId
-        props.startSession(wsId)
+        startSessionWhenReady(wsId)
       } catch (error) {
         showToast('error', t('notice.error', { message: error instanceof Error ? error.message : String(error) }))
       }
     },
-    [activeSessionId, api, props, sessionsByPath, showToast, t],
+    [activeSessionId, api, props, sessionsByPath, showToast, startSessionWhenReady, t],
   )
 
   /** Start a brand-new conversation inside `row.path`. */
@@ -559,12 +599,12 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
           saveStoredSet(STORAGE_EXPANDED_CHATS, next)
           return next
         })
-        props.startSession(wsId)
+        startSessionWhenReady(wsId)
       } catch (error) {
         showToast('error', t('notice.error', { message: error instanceof Error ? error.message : String(error) }))
       }
     },
-    [api, props, showToast, t],
+    [api, showToast, startSessionWhenReady, t],
   )
 
   const handleTogglePin = useCallback(
@@ -595,15 +635,14 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
       setFromDraft('')
       showToast('info', t('notice.created', { branch: created.branch }))
       await refreshOverview(true)
-      if (created.workspaceId !== undefined) {
-        props.startSession(created.workspaceId)
-      }
+      const wsId = created.workspaceId ?? (await api.ensureWorkspace(created.path, created.branch)).workspaceId
+      startSessionWhenReady(wsId)
     } catch (error) {
       showToast('error', t('notice.error', { message: error instanceof Error ? error.message : String(error) }))
     } finally {
       setBusy(false)
     }
-  }, [api, branchDraft, busy, createDialog, fromDraft, props, refreshOverview, showToast, t])
+  }, [api, branchDraft, busy, createDialog, fromDraft, refreshOverview, showToast, startSessionWhenReady, t])
 
   const submitRemoveWorktree = useCallback(async () => {
     if (removeDialog === null || busy) return

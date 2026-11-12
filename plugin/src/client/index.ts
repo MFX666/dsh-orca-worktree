@@ -108,6 +108,19 @@ export function apply(ctx: ClientContext): void {
     const picked = await uiWorkspace.pickDirectory()
     if (picked === null) return
     const ws = await workspaces.create({ path: picked })
+    // `uiWorkspace.startSession` silently no-ops ("unknown workspace" warning)
+    // when the client workspaces store has not yet received the just-created
+    // workspace, so wait for the store to list it before starting.
+    const list = (workspaces as unknown as {
+      list?: { getSnapshot?: () => { items?: readonly { workspaceId?: string }[] } }
+    }).list
+    const listed = (): boolean => {
+      const items = list?.getSnapshot?.().items
+      return items === undefined || items.some(item => item.workspaceId === ws.workspaceId)
+    }
+    for (let waited = 0; !listed() && waited < 10_000; waited += 200) {
+      await new Promise(resolve => window.setTimeout(resolve, 200))
+    }
     uiWorkspace.startSession(ws.workspaceId)
   }
 
