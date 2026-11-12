@@ -102,6 +102,8 @@ export interface WorktreeStatusValue {
   readonly path: string
   readonly branch: string
   readonly dirtyCount: number
+  /** Resolved remote branch ref (e.g. `origin/feat-x`) when this branch has been pushed to a remote. */
+  readonly upstream?: string
   readonly ahead?: number
   readonly behind?: number
 }

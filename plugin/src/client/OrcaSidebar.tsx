@@ -1,15 +1,13 @@
 /**
- * Orca-style left sidebar tree overriding `sidebar.workspaces` at priority -1.
+ * VS Code Minimalist Explorer-style left sidebar tree overriding `sidebar.workspaces`.
  *
  * Hierarchy:
- * 1. Git Repository Group (`📁 repo-name` + hover `⌄ ••• +`)
- *    └── Worktree Branch Row (`● branch_name` + `[chats]` + `★` + hover `+ •••`)
- *          ├── Expandable Conversation sub-rows (spinner while running, plain when ended)
- *          └── Orca Lineage Capsule (`[ ⑂ N | ● running ● idle ⌄ ]`)
- *                └── Indented Child Worktree Rows (18px per level; registry lineage
- *                    or physical path nesting derived by the host)
- * 2. Non-Git Folder Workspaces (registered folders that are not Git checkouts)
- * 3. Ungrouped Sessions (fallback so zero conversations are ever stranded)
+ * 1. Workspace / Repository Header (`▾ repo-name` — clean chevron + title, NO folder icon)
+ *    └── Git Branch Row (`⑂ branch-name` + minimal status/chat/star)
+ *          ├── Conversation sub-rows (clean 1px VS Code indent guide)
+ *          └── Child Worktree Subtree (clean 1px VS Code indent guide)
+ * 2. Non-Git Folder Workspaces (`▾ workspace-name` — NO folder icon)
+ * 3. Ungrouped Sessions (`▾ 未分组对话`)
  * @module dsh-worktree-plugin/client/OrcaSidebar
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent, type ReactElement } from 'react'
@@ -19,15 +17,15 @@ import type { WorktreeApi } from './api.ts'
 import {
   IconChat,
   IconChevron,
+  IconClose,
   IconDots,
-  IconFolder,
+  IconGitBranch,
   IconLineage,
   IconPlus,
   IconRefresh,
   IconSearch,
   IconStar,
 } from './icons.tsx'
-import { TREE_INDENT_PX } from './styles.ts'
 
 type Translate = (key: string, params?: Record<string, string | number>) => string
 
@@ -124,6 +122,9 @@ const STORAGE_COLLAPSED_REPOS = 'dsh.orcaWorktree.collapsedRepos.v1'
 const STORAGE_COLLAPSED_LINEAGE = 'dsh.orcaWorktree.collapsedLineage.v1'
 const STORAGE_EXPANDED_CHATS = 'dsh.orcaWorktree.expandedChats.v1'
 
+/** Chat sub-lists longer than this collapse to the first rows; a toggle reveals the rest. */
+const CHAT_PREVIEW_LIMIT = 5
+
 function loadStoredSet(key: string): Set<string> {
   try {
     const raw = window.localStorage.getItem(key)
@@ -154,6 +155,23 @@ function sessionLabel(s: SessionSummaryLike, t: Translate): string {
   return text.length > 0 ? text : t('wt.untitledChat')
 }
 
+function formatCompactAge(updatedAt: number | undefined, nowMs: number, t: Translate): string {
+  if (updatedAt === undefined || !Number.isFinite(updatedAt) || updatedAt <= 0) return ''
+  const diffSec = Math.max(0, Math.floor((nowMs - updatedAt) / 1000))
+  if (diffSec < 60) return t('time.now')
+  const mins = Math.floor(diffSec / 60)
+  if (mins < 60) return t('time.min', { n: mins })
+  const hours = Math.floor(mins / 60)
+  if (hours < 24) return t('time.hour', { n: hours })
+  const days = Math.floor(hours / 24)
+  return t('time.day', { n: days })
+}
+
+function isMacPlatform(): boolean {
+  if (typeof navigator === 'undefined') return true
+  return /Mac|iPhone|iPad|iPod/i.test(navigator.platform || navigator.userAgent)
+}
+
 /** Conversation rows keep the stock DSH idle look (no marker): spinner while running, warn dot while awaiting the user. */
 function ChatMarker({ state }: { state: 'running' | 'pending' | 'idle' }): ReactElement | null {
   if (state === 'running') return <span className="owt-loading" aria-hidden />
@@ -169,11 +187,12 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
   const panelActive = props.usePanelInfo !== undefined ? props.usePanelInfo(i => i.activePanelId !== null) : false
 
   const [overview, setOverview] = useState<WorktreeOverviewValue | null>(null)
-  const [searchOpen, setSearchOpen] = useState(false)
   const [query, setQuery] = useState('')
+  const [nowMs, setNowMs] = useState(() => Date.now())
   const [collapsedRepos, setCollapsedRepos] = useState<ReadonlySet<string>>(() => loadStoredSet(STORAGE_COLLAPSED_REPOS))
   const [collapsedLineage, setCollapsedLineage] = useState<ReadonlySet<string>>(() => loadStoredSet(STORAGE_COLLAPSED_LINEAGE))
   const [expandedChats, setExpandedChats] = useState<ReadonlySet<string>>(() => loadStoredSet(STORAGE_EXPANDED_CHATS))
+  const [expandedChatLists, setExpandedChatLists] = useState<ReadonlySet<string>>(() => new Set())
   const [createDialog, setCreateDialog] = useState<CreateDialogState | null>(null)
   const [branchDraft, setBranchDraft] = useState('')
   const [fromDraft, setFromDraft] = useState('')
@@ -190,11 +209,14 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
   const [busy, setBusy] = useState(false)
   const [toast, setToast] = useState<ToastNotice | null>(null)
 
+  const rootRef = useRef<HTMLDivElement | null>(null)
   const searchInputRef = useRef<HTMLInputElement | null>(null)
   const composingRef = useRef(false)
   const userPickedFromRef = useRef(false)
   const overviewRef = useRef<WorktreeOverviewValue | null>(null)
   overviewRef.current = overview
+
+  const shortcutBadge = useMemo(() => (isMacPlatform() ? '⌘F' : 'Ctrl+F'), [])
 
   const showToast = useCallback((kind: 'info' | 'error', text: string) => {
     setToast({ kind, text })
@@ -205,6 +227,12 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
     const timer = window.setTimeout(() => { setToast(null) }, 3500)
     return () => { window.clearTimeout(timer) }
   }, [toast])
+
+  // Keep relative timestamps fresh once per minute.
+  useEffect(() => {
+    const timer = window.setInterval(() => { setNowMs(Date.now()) }, 60_000)
+    return () => { window.clearInterval(timer) }
+  }, [])
 
   // Refresh git worktree overview whenever registered workspaces change or periodically.
   const workspaceSignature = useMemo(
@@ -339,6 +367,23 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
     return () => { window.removeEventListener('keydown', onKey) }
   }, [createDialog, removeDialog, wsRenameDialog, wsDeleteDialog, busy])
 
+  // Quick filter shortcut (Cmd/Ctrl+F when focus is inside sidebar).
+  useEffect(() => {
+    if (!wide) return
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === 'f') {
+        const active = document.activeElement
+        if (active !== null && rootRef.current?.contains(active)) {
+          event.preventDefault()
+          searchInputRef.current?.focus()
+          searchInputRef.current?.select()
+        }
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => { window.removeEventListener('keydown', onKeyDown) }
+  }, [wide])
+
   const activeSessionId = useMemo(() => {
     if (panelActive) return undefined
     for (const id of sessionList.ids) {
@@ -350,6 +395,32 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
 
   const archivedSet = useMemo(() => new Set(workspaceSnap.archivedSessionIds), [workspaceSnap.archivedSessionIds])
   const pinnedSessionSet = useMemo(() => new Set(workspaceSnap.pinnedSessionIds), [workspaceSnap.pinnedSessionIds])
+
+  /**
+   * Long chat lists preview only the top rows (pinned chats sort first) until the
+   * user expands; pinned chats beyond the slice always stay visible.
+   */
+  const previewChats = useCallback(
+    (chats: readonly SessionSummaryLike[], key: string): readonly SessionSummaryLike[] => {
+      if (chats.length <= CHAT_PREVIEW_LIMIT || expandedChatLists.has(key)) return chats
+      const top = chats.slice(0, CHAT_PREVIEW_LIMIT)
+      const topIds = new Set(top.map(c => c.id))
+      for (const chat of chats) {
+        if (pinnedSessionSet.has(chat.id) && !topIds.has(chat.id)) top.push(chat)
+      }
+      return top
+    },
+    [expandedChatLists, pinnedSessionSet],
+  )
+
+  const toggleChatList = useCallback((key: string) => {
+    setExpandedChatLists(prev => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }, [])
 
   const visibleSessions = useMemo(() => {
     const list: SessionSummaryLike[] = []
@@ -374,9 +445,6 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
 
   // Assign each visible Session to its deepest matching checkout/workspace path (or workspaceId).
   const { sessionsByPath, ungroupedSessions } = useMemo(() => {
-    const byWsId = new Map<string, string>()
-    for (const ws of workspaceSnap.items) byWsId.set(ws.workspaceId, normalizePath(ws.path))
-
     const allKnownPaths: string[] = []
     const seen = new Set<string>()
     for (const repo of overview?.repos ?? []) {
@@ -640,12 +708,11 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
           aria-label={t('header.search')}
           title={t('header.search')}
           onClick={() => {
-            setSearchOpen(true)
             props.expandSidebar?.()
             window.setTimeout(() => { searchInputRef.current?.focus() }, 180)
           }}
         >
-          <IconSearch size={16} />
+          <IconSearch size={15} />
         </button>
         <button
           type="button"
@@ -654,7 +721,7 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
           title={t('header.addRepo')}
           onClick={() => { void props.pickAndAddWorkspace() }}
         >
-          <IconPlus size={16} />
+          <IconPlus size={15} />
         </button>
       </div>
     )
@@ -696,8 +763,11 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
 
     if (normalizedQuery !== '' && roots.length === 0) return null
     const repoCollapsed = normalizedQuery === '' && collapsedRepos.has(repo.repositoryRoot)
+    const repoContainsActive = repo.rows.some(r =>
+      (sessionsByPath.get(normalizePath(r.path)) ?? []).some(c => c.id === activeSessionId),
+    )
 
-    const renderWorktreeTree = (row: WorktreeRow, depth: number): ReactElement => {
+    const renderWorktreeTree = (row: WorktreeRow): ReactElement => {
       const rowNorm = normalizePath(row.path)
       const kids = (childrenMap.get(rowNorm) ?? []).filter(subtreeVisible)
       const lineageCollapsed = normalizedQuery === '' && collapsedLineage.has(rowNorm)
@@ -708,22 +778,10 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
           ? chats.some(c => sessionLabel(c, t).toLowerCase().includes(normalizedQuery))
           : expandedChats.has(rowNorm)
       const status = worktreeStateKind(row.path)
-
-      // Count child worktree status breakdown for the `[⑂ 2 | ● 1 ● 1 ⌄]` capsule!
-      let runningKids = 0
-      let readyKids = 0
-      for (const kid of kids) {
-        const st = worktreeStateKind(kid.path)
-        if (st === 'running' || st === 'pending') runningKids += 1
-        else readyKids += 1
-      }
+      const chatPreview = previewChats(chats, `wt:${rowNorm}`)
 
       return (
-        <div
-          key={row.path}
-          className="owt-wt-block"
-          style={depth > 0 ? { marginLeft: depth * TREE_INDENT_PX } : undefined}
-        >
+        <div key={row.path} className="owt-wt-block">
           <div
             className="owt-wt-row"
             role="treeitem"
@@ -751,13 +809,20 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
               })
             }}
           >
-            <span className="owt-dot" data-status={status} aria-hidden />
-            <span className="owt-wt-branch">{row.displayName ?? row.branch}</span>
+            <span className="owt-git-icon" data-status={status} aria-hidden>
+              {status === 'running' ? <span className="owt-loading" /> : <IconGitBranch size={13.5} />}
+            </span>
+
+            <span className="owt-wt-branch-wrap">
+              <span className="owt-wt-branch">{row.displayName ?? row.branch}</span>
+            </span>
+
             {row.dirtyCount > 0 && (
-              <span className="owt-dirty-pill" title={`${row.dirtyCount} uncommitted`}>
+              <span className="owt-dirty-pill" title={t('wt.dirtyHint', { count: row.dirtyCount })}>
                 {row.dirtyCount}
               </span>
             )}
+
             {chats.length > 1 && (
               <button
                 type="button"
@@ -769,10 +834,27 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
                   toggleSetItem(setExpandedChats, STORAGE_EXPANDED_CHATS, rowNorm)
                 }}
               >
-                <IconChat size={11} />
+                <IconChat size={10.5} />
                 <span>{chats.length}</span>
               </button>
             )}
+
+            {kids.length > 0 && (
+              <button
+                type="button"
+                className="owt-lineage-toggle"
+                aria-expanded={!lineageCollapsed}
+                title={t('wt.childrenBadge', { count: kids.length })}
+                onClick={event => {
+                  event.stopPropagation()
+                  toggleSetItem(setCollapsedLineage, STORAGE_COLLAPSED_LINEAGE, rowNorm)
+                }}
+              >
+                <IconChevron open={!lineageCollapsed} size={10} />
+                {lineageCollapsed && <span>{kids.length}</span>}
+              </button>
+            )}
+
             <span className="owt-hover-actions" onClick={event => { event.stopPropagation() }}>
               <button
                 type="button"
@@ -781,7 +863,7 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
                 aria-label={t('wt.newChat')}
                 onClick={event => { void startNewChatInWorktree(row, event) }}
               >
-                <IconPlus size={13} />
+                <IconPlus size={12.5} />
               </button>
               <button
                 type="button"
@@ -797,9 +879,10 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
                   })
                 }}
               >
-                <IconDots size={13} />
+                <IconDots size={12.5} />
               </button>
             </span>
+
             <button
               type="button"
               className="owt-star-btn"
@@ -808,17 +891,18 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
               title={row.pinned ? t('wt.unpin') : t('wt.pin')}
               onClick={event => { void handleTogglePin(row, event) }}
             >
-              <IconStar filled={row.pinned} size={13} />
+              <IconStar filled={row.pinned} size={12.5} />
             </button>
           </div>
 
-          {/* Expandable conversation sub-list under this worktree */}
+          {/* Expandable conversation sub-list under this worktree (solid rail) */}
           {chatsOpen && chats.length > 0 && (
             <div className="owt-chats" role="group">
-              {chats.map(chat => {
+              {chatPreview.map(chat => {
                 const selected = chat.id === activeSessionId
                 const label = sessionLabel(chat, t)
                 const chatSt = sessionStateKind(chat)
+                const ageText = chat.blank ? '' : formatCompactAge(chat.updatedAt, nowMs, t)
                 return (
                   <div
                     key={chat.id}
@@ -848,6 +932,7 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
                   >
                     <ChatMarker state={chatSt} />
                     <span className="owt-chat-title">{label}</span>
+                    {ageText !== '' && <span className="owt-chat-time">{ageText}</span>}
                     {!chat.blank && (
                       <span className="owt-hover-actions" onClick={event => { event.stopPropagation() }}>
                         <button
@@ -866,43 +951,33 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
                   </div>
                 )
               })}
+              {chats.length > CHAT_PREVIEW_LIMIT && (
+                <button
+                  type="button"
+                  className="owt-chats-more"
+                  aria-expanded={expandedChatLists.has(`wt:${rowNorm}`)}
+                  onClick={event => {
+                    event.stopPropagation()
+                    toggleChatList(`wt:${rowNorm}`)
+                  }}
+                >
+                  <IconChevron open={expandedChatLists.has(`wt:${rowNorm}`)} size={10} />
+                  <span>
+                    {expandedChatLists.has(`wt:${rowNorm}`)
+                      ? t('wt.chatsLess')
+                      : t('wt.chatsMore', { count: chats.length - chatPreview.length })}
+                  </span>
+                </button>
+              )}
             </div>
           )}
 
-          {/* Orca child-worktree lineage capsule: [ ⑂ 2 | ● 1 ● 1 ⌄ ] */}
-          {kids.length > 0 && (
-            <div className="owt-capsule-wrap">
-              <button
-                type="button"
-                className="owt-capsule"
-                aria-expanded={!lineageCollapsed}
-                title={t('wt.childrenBadge', { count: kids.length })}
-                onClick={event => {
-                  event.stopPropagation()
-                  toggleSetItem(setCollapsedLineage, STORAGE_COLLAPSED_LINEAGE, rowNorm)
-                }}
-              >
-                <IconLineage size={11} />
-                <span>{kids.length}</span>
-                <span className="owt-capsule-sep" aria-hidden />
-                {runningKids > 0 && (
-                  <span className="owt-capsule-stat">
-                    <span className="owt-mini-dot" data-tone="warn" aria-hidden />
-                    <span>{runningKids}</span>
-                  </span>
-                )}
-                {readyKids > 0 && (
-                  <span className="owt-capsule-stat">
-                    <span className="owt-mini-dot" aria-hidden />
-                    <span>{readyKids}</span>
-                  </span>
-                )}
-                <IconChevron open={!lineageCollapsed} size={10} />
-              </button>
+          {/* Child-worktree lineage subtree (clean VS Code 1px indent rail) */}
+          {kids.length > 0 && !lineageCollapsed && (
+            <div className="owt-lineage-rail" role="group" data-worktree-lineage-children>
+              {kids.map(kid => renderWorktreeTree(kid))}
             </div>
           )}
-
-          {!lineageCollapsed && kids.map(kid => renderWorktreeTree(kid, depth + 1))}
         </div>
       )
     }
@@ -913,6 +988,7 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
           className="owt-repo-row"
           role="treeitem"
           aria-expanded={!repoCollapsed}
+          data-has-active={repoContainsActive ? 'true' : 'false'}
           title={repo.repositoryRoot}
           onClick={() => { toggleSetItem(setCollapsedRepos, STORAGE_COLLAPSED_REPOS, repo.repositoryRoot) }}
           onContextMenu={event => {
@@ -923,20 +999,12 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
             })
           }}
         >
-          <span className="owt-repo-icon">
-            <IconFolder size={15} />
+          <span className="owt-repo-chevron">
+            <IconChevron open={!repoCollapsed} size={12} />
           </span>
           <span className="owt-repo-name">{repo.name}</span>
+          <span className="owt-repo-count">{repo.rows.length}</span>
           <span className="owt-hover-actions" onClick={event => { event.stopPropagation() }}>
-            <button
-              type="button"
-              className="owt-icon-btn"
-              title={repoCollapsed ? t('repo.expand') : t('repo.collapse')}
-              aria-label={repoCollapsed ? t('repo.expand') : t('repo.collapse')}
-              onClick={() => { toggleSetItem(setCollapsedRepos, STORAGE_COLLAPSED_REPOS, repo.repositoryRoot) }}
-            >
-              <IconChevron open={!repoCollapsed} size={13} />
-            </button>
             <button
               type="button"
               className="owt-icon-btn"
@@ -950,7 +1018,7 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
                 })
               }}
             >
-              <IconDots size={14} />
+              <IconDots size={13.5} />
             </button>
             <button
               type="button"
@@ -963,11 +1031,15 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
                 setCreateDialog({ repositoryRoot: repo.repositoryRoot })
               }}
             >
-              <IconPlus size={14} />
+              <IconPlus size={13.5} />
             </button>
           </span>
         </div>
-        {!repoCollapsed && roots.map(row => renderWorktreeTree(row, 0))}
+        {!repoCollapsed && roots.length > 0 && (
+          <div className="owt-repo-children" role="group">
+            {roots.map(row => renderWorktreeTree(row))}
+          </div>
+        )}
       </div>
     )
   }
@@ -1040,59 +1112,52 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
     renderedRepos.length === 0 && filteredNonGit.length === 0 && filteredUngrouped.length === 0
 
   return (
-    <div className="owt-root">
+    <div className="owt-root" ref={rootRef}>
       <div className="owt-toolbar">
-        {searchOpen ? (
-          <div className="owt-search-wrap">
+        <div className="owt-search-wrap">
+          <span className="owt-search-icon">
             <IconSearch size={13} />
-            <input
-              ref={searchInputRef}
-              type="text"
-              placeholder={t('header.search')}
-              value={query}
-              autoFocus
-              onChange={event => { setQuery(event.target.value) }}
-              onKeyDown={event => {
-                if (event.key === 'Escape') {
-                  setQuery('')
-                  setSearchOpen(false)
-                }
-              }}
-            />
+          </span>
+          <input
+            ref={searchInputRef}
+            type="text"
+            placeholder={t('header.search')}
+            aria-label={t('header.search')}
+            value={query}
+            onChange={event => { setQuery(event.target.value) }}
+            onKeyDown={event => {
+              if (event.key === 'Escape') {
+                setQuery('')
+                event.currentTarget.blur()
+              }
+            }}
+          />
+          {query !== '' ? (
             <button
               type="button"
-              className="owt-icon-btn"
+              className="owt-clear-btn"
+              aria-label={t('header.clearSearch')}
+              title={t('header.clearSearch')}
               onClick={() => {
                 setQuery('')
-                setSearchOpen(false)
+                searchInputRef.current?.focus()
               }}
             >
-              ✕
+              <IconClose size={11} />
             </button>
-          </div>
-        ) : (
-          <>
-            <span className="owt-toolbar-title">{t('header.title')}</span>
-            <button
-              type="button"
-              className="owt-icon-btn"
-              title={t('header.search')}
-              aria-label={t('header.search')}
-              onClick={() => { setSearchOpen(true) }}
-            >
-              <IconSearch size={14} />
-            </button>
-            <button
-              type="button"
-              className="owt-icon-btn"
-              title={t('header.addRepo')}
-              aria-label={t('header.addRepo')}
-              onClick={() => { void props.pickAndAddWorkspace() }}
-            >
-              <IconPlus size={15} />
-            </button>
-          </>
-        )}
+          ) : (
+            <span className="owt-kbd-hint" aria-hidden>{shortcutBadge}</span>
+          )}
+        </div>
+        <button
+          type="button"
+          className="owt-add-btn"
+          title={t('header.addRepo')}
+          aria-label={t('header.addRepo')}
+          onClick={() => { void props.pickAndAddWorkspace() }}
+        >
+          <IconPlus size={14} />
+        </button>
       </div>
 
       {toast !== null && (
@@ -1110,6 +1175,9 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
           const isMissing = missingPathSet.has(norm)
           const collapsed = normalizedQuery === '' && collapsedRepos.has(norm)
           const chats = sessionsByPath.get(norm) ?? []
+          const folderHasActive = chats.some(c => c.id === activeSessionId)
+          const chatPreview = previewChats(chats, `ws:${norm}`)
+          const chatsExpanded = expandedChatLists.has(`ws:${norm}`)
           return (
             <div className="owt-group" key={ws.workspaceId}>
               <div
@@ -1117,6 +1185,7 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
                 role="treeitem"
                 aria-expanded={!collapsed}
                 data-missing={isMissing ? 'true' : 'false'}
+                data-has-active={folderHasActive ? 'true' : 'false'}
                 title={isMissing ? t('dialog.wsDelete.missingHint', { path: ws.path }) : ws.path}
                 onClick={() => { toggleSetItem(setCollapsedRepos, STORAGE_COLLAPSED_REPOS, norm) }}
                 onContextMenu={event => {
@@ -1127,19 +1196,16 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
                   })
                 }}
               >
-                <span className="owt-repo-icon">
-                  <IconFolder size={15} />
+                <span className="owt-repo-chevron">
+                  <IconChevron open={!collapsed} size={12} />
                 </span>
                 <span className="owt-repo-name">{ws.title}</span>
-                {isMissing && <span className="owt-missing-pill">{t('wt.missingBadge')}</span>}
+                {isMissing ? (
+                  <span className="owt-missing-pill">{t('wt.missingBadge')}</span>
+                ) : (
+                  chats.length > 0 && <span className="owt-repo-count">{chats.length}</span>
+                )}
                 <span className="owt-hover-actions" onClick={event => { event.stopPropagation() }}>
-                  <button
-                    type="button"
-                    className="owt-icon-btn"
-                    onClick={() => { toggleSetItem(setCollapsedRepos, STORAGE_COLLAPSED_REPOS, norm) }}
-                  >
-                    <IconChevron open={!collapsed} size={13} />
-                  </button>
                   <button
                     type="button"
                     className="owt-icon-btn"
@@ -1151,7 +1217,7 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
                       })
                     }}
                   >
-                    <IconDots size={14} />
+                    <IconDots size={13.5} />
                   </button>
                   {!isMissing && (
                     <button
@@ -1160,34 +1226,57 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
                       title={t('wt.newChat')}
                       onClick={() => { props.startSession(ws.workspaceId) }}
                     >
-                      <IconPlus size={14} />
+                      <IconPlus size={13.5} />
                     </button>
                   )}
                 </span>
               </div>
-              {!collapsed &&
-                chats.map(chat => {
-                  const selected = chat.id === activeSessionId
-                  const label = sessionLabel(chat, t)
-                  const st = sessionStateKind(chat)
-                  return (
-                    <div
-                      key={chat.id}
-                      className="owt-wt-row"
-                      role="treeitem"
-                      data-active={selected ? 'true' : 'false'}
-                      onClick={() => { props.openSession(chat.id) }}
-                      onContextMenu={event => {
-                        if (chat.blank) return
-                        event.preventDefault()
-                        props.openSessionMenu(chat.id, label, { x: event.clientX, y: event.clientY })
+              {!collapsed && chats.length > 0 && (
+                <div className="owt-repo-children" role="group">
+                  {chatPreview.map(chat => {
+                    const selected = chat.id === activeSessionId
+                    const label = sessionLabel(chat, t)
+                    const st = sessionStateKind(chat)
+                    const ageText = chat.blank ? '' : formatCompactAge(chat.updatedAt, nowMs, t)
+                    return (
+                      <div
+                        key={chat.id}
+                        className="owt-wt-row"
+                        role="treeitem"
+                        data-active={selected ? 'true' : 'false'}
+                        onClick={() => { props.openSession(chat.id) }}
+                        onContextMenu={event => {
+                          if (chat.blank) return
+                          event.preventDefault()
+                          props.openSessionMenu(chat.id, label, { x: event.clientX, y: event.clientY })
+                        }}
+                      >
+                        <ChatMarker state={st} />
+                        <span className="owt-wt-plain-label">{label}</span>
+                        {ageText !== '' && <span className="owt-chat-time">{ageText}</span>}
+                      </div>
+                    )
+                  })}
+                  {chats.length > CHAT_PREVIEW_LIMIT && (
+                    <button
+                      type="button"
+                      className="owt-chats-more"
+                      aria-expanded={chatsExpanded}
+                      onClick={event => {
+                        event.stopPropagation()
+                        toggleChatList(`ws:${norm}`)
                       }}
                     >
-                      <ChatMarker state={st} />
-                      <span className="owt-wt-branch">{label}</span>
-                    </div>
-                  )
-                })}
+                      <IconChevron open={chatsExpanded} size={10} />
+                      <span>
+                        {chatsExpanded
+                          ? t('wt.chatsLess')
+                          : t('wt.chatsMore', { count: chats.length - chatPreview.length })}
+                      </span>
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
           )
         })}
@@ -1196,33 +1285,61 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
         {filteredUngrouped.length > 0 && (
           <div className="owt-group">
             <div className="owt-repo-row" role="treeitem">
-              <span className="owt-repo-icon">
-                <IconChat size={14} />
+              <span className="owt-repo-chevron">
+                <IconChevron open size={12} />
               </span>
               <span className="owt-repo-name">{t('folder.ungrouped')}</span>
+              <span className="owt-repo-count">{filteredUngrouped.length}</span>
             </div>
-            {filteredUngrouped.map(chat => {
-              const selected = chat.id === activeSessionId
-              const label = sessionLabel(chat, t)
-              const st = sessionStateKind(chat)
-              return (
-                <div
-                  key={chat.id}
-                  className="owt-wt-row"
-                  role="treeitem"
-                  data-active={selected ? 'true' : 'false'}
-                  onClick={() => { props.openSession(chat.id) }}
-                  onContextMenu={event => {
-                    if (chat.blank) return
-                    event.preventDefault()
-                    props.openSessionMenu(chat.id, label, { x: event.clientX, y: event.clientY })
-                  }}
-                >
-                  <ChatMarker state={st} />
-                  <span className="owt-wt-branch">{label}</span>
-                </div>
-              )
-            })}
+            <div className="owt-repo-children" role="group">
+              {(() => {
+                const ungroupedPreview = previewChats(filteredUngrouped, 'ungrouped')
+                const ungroupedExpanded = expandedChatLists.has('ungrouped')
+                return (
+                  <>
+                    {ungroupedPreview.map(chat => {
+                      const selected = chat.id === activeSessionId
+                      const label = sessionLabel(chat, t)
+                      const st = sessionStateKind(chat)
+                      const ageText = chat.blank ? '' : formatCompactAge(chat.updatedAt, nowMs, t)
+                      return (
+                        <div
+                          key={chat.id}
+                          className="owt-wt-row"
+                          role="treeitem"
+                          data-active={selected ? 'true' : 'false'}
+                          onClick={() => { props.openSession(chat.id) }}
+                          onContextMenu={event => {
+                            if (chat.blank) return
+                            event.preventDefault()
+                            props.openSessionMenu(chat.id, label, { x: event.clientX, y: event.clientY })
+                          }}
+                        >
+                          <ChatMarker state={st} />
+                          <span className="owt-wt-plain-label">{label}</span>
+                          {ageText !== '' && <span className="owt-chat-time">{ageText}</span>}
+                        </div>
+                      )
+                    })}
+                    {filteredUngrouped.length > CHAT_PREVIEW_LIMIT && (
+                      <button
+                        type="button"
+                        className="owt-chats-more"
+                        aria-expanded={ungroupedExpanded}
+                        onClick={() => { toggleChatList('ungrouped') }}
+                      >
+                        <IconChevron open={ungroupedExpanded} size={10} />
+                        <span>
+                          {ungroupedExpanded
+                            ? t('wt.chatsLess')
+                            : t('wt.chatsMore', { count: filteredUngrouped.length - ungroupedPreview.length })}
+                        </span>
+                      </button>
+                    )}
+                  </>
+                )
+              })()}
+            </div>
           </div>
         )}
 
@@ -1244,28 +1361,49 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
             }}
           >
             <div className="owt-modal" role="dialog" aria-modal="true" onClick={event => { event.stopPropagation() }}>
-              <div className="owt-modal-title">
-                {createDialog.parentBranch !== undefined
-                  ? t('dialog.create.childTitle', { parent: createDialog.parentBranch })
-                  : t('dialog.create.title')}
+              <div className="owt-modal-head">
+                <div className="owt-modal-title">
+                  <span className="owt-modal-title-icon">
+                    <IconLineage size={14.5} />
+                  </span>
+                  <span>
+                    {createDialog.parentBranch !== undefined ? t('dialog.create.childHeading') : t('dialog.create.title')}
+                  </span>
+                </div>
+                {createDialog.parentBranch !== undefined && (
+                  <div className="owt-modal-sub">
+                    <span>{t('dialog.create.childSub')}</span>
+                    <span className="owt-code-chip">{createDialog.parentBranch}</span>
+                    {t('dialog.create.childSubTail') !== '' && <span>{t('dialog.create.childSubTail')}</span>}
+                  </div>
+                )}
               </div>
-              <input
-                className="owt-input"
-                type="text"
-                autoFocus
-                disabled={busy}
-                placeholder={t('dialog.create.branchPlaceholder')}
-                value={branchDraft}
-                onChange={event => { setBranchDraft(event.target.value) }}
-                onCompositionStart={() => { composingRef.current = true }}
-                onCompositionEnd={() => { composingRef.current = false }}
-                onKeyDown={event => {
-                  if (event.key === 'Enter' && !composingRef.current) {
-                    event.preventDefault()
-                    void submitCreateWorktree()
-                  }
-                }}
-              />
+
+              <div className="owt-field">
+                <span className="owt-field-label">{t('dialog.create.branchLabel')}</span>
+                <div className="owt-input-shell">
+                  <input
+                    className="owt-input"
+                    data-mono="true"
+                    type="text"
+                    autoFocus
+                    disabled={busy}
+                    placeholder={t('dialog.create.branchPlaceholder')}
+                    value={branchDraft}
+                    onChange={event => { setBranchDraft(event.target.value) }}
+                    onCompositionStart={() => { composingRef.current = true }}
+                    onCompositionEnd={() => { composingRef.current = false }}
+                    onKeyDown={event => {
+                      if (event.key === 'Enter' && !composingRef.current) {
+                        event.preventDefault()
+                        void submitCreateWorktree()
+                      }
+                    }}
+                  />
+                  <span className="owt-input-enter-hint" aria-hidden>{t('dialog.create.enterHint')}</span>
+                </div>
+              </div>
+
               <div className="owt-field">
                 <span className="owt-field-label">{t('dialog.create.fromLabel')}</span>
                 <div className="owt-select-row">
@@ -1317,6 +1455,7 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
                 </div>
                 {staleHostHint && <span className="owt-field-hint">{t('dialog.create.restartHint')}</span>}
               </div>
+
               <div className="owt-modal-foot">
                 <button
                   type="button"

@@ -227,6 +227,8 @@ function ok<T>(value: T): WorktreeEnvelope<T> {
 export default class WorktreeManagerService extends TypertRemoteService {
   static inject = ['fs', 'subprocess', 'workingDirectory', 'workspaceRegistry', 'tools']
 
+  private orcaLineageCache: { expiresAt: number; map: ReadonlyMap<string, string> } | null = null
+
   constructor(ctx: Context) {
     super(ctx, 'rWorktreeManager')
     this.registerTools()
@@ -256,7 +258,11 @@ export default class WorktreeManagerService extends TypertRemoteService {
         workspaces.map(async ws => {
           const stat = await this.fs().lstat(ws.path, undefined, signal).catch(() => undefined)
           if (stat === undefined) {
-            missingPaths.add(ws.path)
+            if (ws.path.includes('/.orca-preparing/') || ws.path.includes('\\.orca-preparing\\')) {
+              claimedPaths.add(ws.path)
+            } else {
+              missingPaths.add(ws.path)
+            }
             return undefined
           }
           const root = await this.tryRepositoryRootOf(hostPolicy, ws.path, signal)
@@ -577,7 +583,9 @@ export default class WorktreeManagerService extends TypertRemoteService {
     }
 
     await this.runArgv(policy, root, ['node', '--input-type=module', '-e', PREPARE_POOL_SCRIPT, poolPath, destPath], COMMAND_TIMEOUT_MS, signal)
-    await run(root, ['--work-tree', root, 'worktree', 'add', '-b', branch, '--', destPath, baseCommit])
+    // `--no-track` prevents `git worktree add -b <branch> <path> origin/main` from setting
+    // `origin/main` as `<branch>@{upstream}` before `<branch>` itself has ever been pushed!
+    await run(root, ['--work-tree', root, 'worktree', 'add', '--no-track', '-b', branch, '--', destPath, baseCommit])
 
     const canonicalDest = await this.canonicalWorktreePath(policy, destPath, signal)
     const canonicalParent = parentPath !== undefined ? await this.canonicalWorktreePath(policy, parentPath, signal) : undefined
@@ -589,7 +597,7 @@ export default class WorktreeManagerService extends TypertRemoteService {
         branch,
         baseCommit,
         repositoryRoot: root,
-        parentPath: canonicalParent !== root ? canonicalParent : undefined,
+        parentPath: canonicalParent !== undefined && canonicalParent !== canonicalDest ? canonicalParent : undefined,
         createdAt: new Date().toISOString(),
       })
       return { ...file, worktrees: rest }
@@ -614,7 +622,7 @@ export default class WorktreeManagerService extends TypertRemoteService {
       branch,
       baseCommit,
       repositoryRoot: root,
-      parentPath: canonicalParent !== root ? canonicalParent : undefined,
+      parentPath: canonicalParent !== undefined && canonicalParent !== canonicalDest ? canonicalParent : undefined,
       workspaceId,
     }
   }
@@ -740,10 +748,9 @@ export default class WorktreeManagerService extends TypertRemoteService {
     // unmerged branches fall through to -D and are flagged for a loud warning.
     let branchDeleted = false
     let branchHadUnmerged = false
-    let upstream: string | undefined
+    let pushedTarget: { remote: string; remoteBranch: string; displayRef: string } | undefined
     if (branch !== undefined && !branch.startsWith('detached')) {
-      const up = await run(root, ['rev-parse', '--abbrev-ref', '--quiet', `${branch}@{upstream}`], [0, 1, 128])
-      if (up.exitCode === 0) upstream = up.stdout.trim() || undefined
+      pushedTarget = await this.resolvePushedRemoteBranch(policy, root, branch, true, signal)
       const safe = await run(root, ['branch', '-d', branch], [0, 1])
       if (safe.exitCode === 0) {
         branchDeleted = true
@@ -755,11 +762,10 @@ export default class WorktreeManagerService extends TypertRemoteService {
     }
     let remoteDeleted: boolean | undefined
     let remoteError: string | undefined
-    if (deleteRemote && upstream !== undefined && upstream.includes('/')) {
-      const slash = upstream.indexOf('/')
-      const pushed = await run(root, ['push', '--delete', upstream.slice(0, slash), upstream.slice(slash + 1)], [0, 1, 128])
+    if (deleteRemote && pushedTarget !== undefined) {
+      const pushed = await run(root, ['push', '--delete', pushedTarget.remote, pushedTarget.remoteBranch], [0, 1, 128])
       remoteDeleted = pushed.exitCode === 0
-      if (!remoteDeleted) remoteError = `failed to delete remote branch ${upstream}`
+      if (!remoteDeleted) remoteError = `failed to delete remote branch ${pushedTarget.displayRef}`
     }
     await run(root, ['worktree', 'prune'], [0, 1])
 
@@ -1045,6 +1051,94 @@ export default class WorktreeManagerService extends TypertRemoteService {
   }
 
   /**
+   * Best-effort read of Orca Desktop's `worktreeLineageById` domain so child worktrees
+   * created inside Orca also preserve their parent-child hierarchy inside DSH's sidebar.
+   * Cached for 15s and completely silent when Orca or `node:sqlite` is absent.
+   */
+  private async readOrcaExternalLineage(signal: AbortSignal | undefined): Promise<ReadonlyMap<string, string>> {
+    const now = Date.now()
+    if (this.orcaLineageCache !== null && now < this.orcaLineageCache.expiresAt) {
+      return this.orcaLineageCache.map
+    }
+    const empty = new Map<string, string>()
+    const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env
+    if (env?.DSH_WORKTREE_POOL) {
+      // Isolated test pool: skip external Orca profile database lookup.
+      return empty
+    }
+    const home = (env?.HOME ?? env?.USERPROFILE)?.trim()
+    if (!home) return empty
+
+    const script = `
+import fs from 'node:fs';
+import path from 'node:path';
+const home = process.argv[1];
+const base = process.platform === 'darwin'
+  ? path.join(home, 'Library', 'Application Support', 'Orca')
+  : path.join(home, '.config', 'Orca');
+const idxPath = path.join(base, 'orca-profile-index.json');
+if (!fs.existsSync(idxPath)) { process.stdout.write('{}'); process.exit(0); }
+const idx = JSON.parse(fs.readFileSync(idxPath, 'utf8'));
+const profId = idx.activeProfileId || 'local-default';
+const dbPath = path.join(base, 'profiles', profId, 'profile-state.db');
+if (!fs.existsSync(dbPath)) { process.stdout.write('{}'); process.exit(0); }
+const { DatabaseSync } = await import('node:sqlite');
+const db = new DatabaseSync(dbPath, { readOnly: true });
+const row = db.prepare("SELECT payload FROM profile_state_documents WHERE domain = 'worktreeLineageById'").get();
+db.close();
+process.stdout.write(row && typeof row.payload === 'string' ? row.payload : '{}');
+`
+    try {
+      const out = await this.runArgv(
+        { mode: 'danger-full-access' },
+        home,
+        ['node', '--no-warnings', '--input-type=module', '-e', script, home],
+        4_000,
+        signal,
+        [0],
+      )
+      const parsed = JSON.parse(out.stdout || '{}') as Record<
+        string,
+        { worktreeId?: string; parentWorktreeId?: string } | undefined
+      >
+      const rawPairs: Array<[string, string]> = []
+      const extractPath = (id: string | undefined): string | undefined => {
+        if (typeof id !== 'string') return undefined
+        const sep = id.indexOf('::')
+        return sep >= 0 ? id.slice(sep + 2) : undefined
+      }
+      for (const rec of Object.values(parsed)) {
+        const childRaw = extractPath(rec?.worktreeId)
+        const parentRaw = extractPath(rec?.parentWorktreeId)
+        if (childRaw && parentRaw && childRaw !== parentRaw) {
+          rawPairs.push([childRaw, parentRaw])
+        }
+      }
+      const map = new Map<string, string>()
+      await Promise.all(
+        rawPairs.map(async ([childRaw, parentRaw]) => {
+          try {
+            const [cTarget, pTarget] = await Promise.all([
+              this.fs().resolve(childRaw, { signal }),
+              this.fs().resolve(parentRaw, { signal }),
+            ])
+            const cPath = this.fs().processPath(cTarget)
+            const pPath = this.fs().processPath(pTarget)
+            if (cPath !== pPath) map.set(cPath, pPath)
+          } catch {
+            // Skip paths no longer resolvable.
+          }
+        }),
+      )
+      this.orcaLineageCache = { expiresAt: Date.now() + 15_000, map }
+      return map
+    } catch {
+      this.orcaLineageCache = { expiresAt: Date.now() + 15_000, map: empty }
+      return empty
+    }
+  }
+
+  /**
    * Archive every session whose cwd sits inside `canonicalPath` (or `rawPath`)
    * or is explicitly accounted on the removed Workspace, delegating to DSH's
    * authoritative `workspaceRegistry.archiveSession`. Never archives `excludeSessionId`
@@ -1245,6 +1339,45 @@ export default class WorktreeManagerService extends TypertRemoteService {
     return this.fs().processPath(resolved)
   }
 
+  /**
+   * Resolve the remote-tracking counterpart of a local branch, preferring its
+   * configured upstream and falling back to `<remote>/<branch>` for every known
+   * remote. `verifyTip` additionally requires the remote-tracking ref to exist,
+   * i.e. the branch was actually pushed at some point. Returns `undefined` when
+   * the branch has never been pushed.
+   */
+  private async resolvePushedRemoteBranch(
+    policy: { mode: string },
+    root: string,
+    branch: string,
+    verifyTip: boolean,
+    signal: AbortSignal | undefined,
+  ): Promise<{ remote: string; remoteBranch: string; displayRef: string } | undefined> {
+    const run = this.gitRunner(policy, signal)
+    const candidates: string[] = []
+    const up = await run(root, ['rev-parse', '--abbrev-ref', '--quiet', `${branch}@{upstream}`], [0, 1, 128])
+    if (up.exitCode === 0 && up.stdout.trim().length > 0) candidates.push(up.stdout.trim())
+    try {
+      const remotes = await run(root, ['remote'], [0, 128])
+      for (const remote of remotes.stdout.split('\n').map(line => line.trim()).filter(Boolean)) {
+        const candidate = `${remote}/${branch}`
+        if (!candidates.includes(candidate)) candidates.push(candidate)
+      }
+    } catch {
+      // No remotes configured: upstream candidate alone decides.
+    }
+    for (const ref of candidates) {
+      const sep = ref.indexOf('/')
+      if (sep <= 0) continue
+      if (verifyTip) {
+        const verify = await run(root, ['rev-parse', '--verify', '--quiet', `refs/remotes/${ref}`], [0, 1, 128])
+        if (verify.exitCode !== 0) continue
+      }
+      return { remote: ref.slice(0, sep), remoteBranch: ref.slice(sep + 1), displayRef: ref }
+    }
+    return undefined
+  }
+
   private async branchOf(policy: { mode: string }, path: string, signal: AbortSignal | undefined): Promise<string | undefined> {
     const run = this.gitRunner(policy, signal)
     const out = await run(path, ['symbolic-ref', '--quiet', '--short', 'HEAD'], [0, 1])
@@ -1293,6 +1426,8 @@ export default class WorktreeManagerService extends TypertRemoteService {
       const rawPath = fields.find(field => field.startsWith('worktree '))?.slice('worktree '.length)
       if (rawPath === undefined || rawPath.length === 0) continue
       if (fields.some(field => field === 'bare' || field.startsWith('prunable'))) continue
+      // Skip Orca's transient locked staging directories (`.../.orca-preparing/...`).
+      if (rawPath.includes('/.orca-preparing/') || rawPath.includes('\\.orca-preparing\\')) continue
       const headField = fields.find(field => field.startsWith('HEAD '))
       const branchField = fields.find(field => field.startsWith('branch '))
       let pathTarget
@@ -1302,6 +1437,7 @@ export default class WorktreeManagerService extends TypertRemoteService {
         continue
       }
       const canonicalPath = this.fs().processPath(pathTarget)
+      if (canonicalPath.includes('/.orca-preparing/') || canonicalPath.includes('\\.orca-preparing\\')) continue
       const isMain = canonicalPath === this.fs().processPath(rootTarget)
       const isManaged = !isMain && this.fs().contains(poolTarget, pathTarget)
       const branch =
@@ -1311,11 +1447,20 @@ export default class WorktreeManagerService extends TypertRemoteService {
       parsedBlocks.push({ canonicalPath, branch, isMain, isManaged })
     }
 
+    // Read external Orca desktop lineage (`worktreeLineageById`) when available so worktrees
+    // derived in Orca also preserve their parent-child hierarchy in DSH's sidebar!
+    const orcaLineage = await this.readOrcaExternalLineage(signal)
+
     // Lineage fallback: a non-managed external worktree nested inside another worktree
     // (registry entry absent, e.g. created by the native DSH `.agents/worktrees` tool)
     // is its physical child. Managed pool checkouts stay top-level unless given an explicit parentPath.
     const derivedParentOf = new Map<string, string>()
     for (const block of parsedBlocks) {
+      const orcaParent = orcaLineage.get(block.canonicalPath)
+      if (orcaParent !== undefined && orcaParent !== block.canonicalPath) {
+        derivedParentOf.set(block.canonicalPath, orcaParent)
+        continue
+      }
       if (block.isManaged) continue
       let best: string | undefined
       for (const other of parsedBlocks) {

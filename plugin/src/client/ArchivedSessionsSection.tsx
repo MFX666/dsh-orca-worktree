@@ -10,7 +10,7 @@
 import { useCallback, useEffect, useMemo, useState, type ReactElement } from 'react'
 import type { WorktreeArchivedMetaValue, WorktreeOverviewValue } from '../protocol.ts'
 import type { WorktreeApi } from './api.ts'
-import { IconChat, IconChevron, IconFolder, IconLineage, IconRefresh, IconSearch } from './icons.tsx'
+import { IconChat, IconChevron, IconClose, IconGitBranch, IconRefresh, IconSearch } from './icons.tsx'
 import type { SessionListSnapshotLike, SessionSummaryLike, WorkspaceListSnapshotLike } from './OrcaSidebar.tsx'
 
 type Translate = (key: string, params?: Record<string, string | number>) => string
@@ -35,6 +35,7 @@ interface BranchBucket {
   readonly path?: string
   readonly removedAt?: string
   readonly isWorktreeBranch: boolean
+  readonly isRemovedCheckout: boolean
   readonly sessions: SessionSummaryLike[]
 }
 
@@ -61,8 +62,13 @@ function formatShortTime(ts: number | undefined): string {
   if (ts === undefined || !Number.isFinite(ts) || ts <= 0) return ''
   try {
     const d = new Date(ts)
+    const now = new Date()
     const pad = (n: number) => String(n).padStart(2, '0')
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+    const datePart =
+      d.getFullYear() === now.getFullYear()
+        ? `${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+        : `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+    return `${datePart} ${pad(d.getHours())}:${pad(d.getMinutes())}`
   } catch {
     return ''
   }
@@ -124,6 +130,7 @@ export function ArchivedSessionsSection(props: ArchivedSessionsSectionProps): Re
     const repoNameByRoot = new Map<string, string>()
     const poolToRepoRoot = new Map<string, string>()
     const activeWorktrees: Array<{ path: string; repoRoot: string; branch: string; isMain: boolean }> = []
+    const activeWorktreePaths = new Set<string>()
 
     for (const r of meta?.repos ?? []) {
       const root = normalizePath(r.repositoryRoot)
@@ -135,8 +142,10 @@ export function ArchivedSessionsSection(props: ArchivedSessionsSectionProps): Re
       repoNameByRoot.set(root, repo.name)
       poolToRepoRoot.set(normalizePath(repo.poolPath), root)
       for (const row of repo.rows) {
+        const normRowPath = normalizePath(row.path)
+        activeWorktreePaths.add(normRowPath)
         activeWorktrees.push({
-          path: normalizePath(row.path),
+          path: normRowPath,
           repoRoot: root,
           branch: row.branch,
           isMain: row.kind === 'main',
@@ -171,7 +180,15 @@ export function ArchivedSessionsSection(props: ArchivedSessionsSectionProps): Re
     // Heuristic: infer repo + branch from common worktree path layouts even for pre-plugin historical sessions!
     const inferFromCwd = (
       cwdNorm: string,
-    ): { repoKey: string; repoName: string; repositoryRoot?: string; branchName: string; isGitRepo: boolean; isWorktreeBranch: boolean } => {
+    ): {
+      repoKey: string
+      repoName: string
+      repositoryRoot?: string
+      branchName: string
+      isGitRepo: boolean
+      isWorktreeBranch: boolean
+      isRemovedCheckout: boolean
+    } => {
       // a) Exact / prefix match on recorded archivedBranches
       const recPath = archivedPathsDesc.find(p => cwdNorm === p || cwdNorm.startsWith(`${p}/`))
       if (recPath !== undefined) {
@@ -184,6 +201,7 @@ export function ArchivedSessionsSection(props: ArchivedSessionsSectionProps): Re
           branchName: rec.branch,
           isGitRepo: true,
           isWorktreeBranch: true,
+          isRemovedCheckout: !activeWorktreePaths.has(recPath),
         }
       }
 
@@ -197,6 +215,7 @@ export function ArchivedSessionsSection(props: ArchivedSessionsSectionProps): Re
           branchName: activeWt.branch,
           isGitRepo: true,
           isWorktreeBranch: true,
+          isRemovedCheckout: false,
         }
       }
 
@@ -206,9 +225,9 @@ export function ArchivedSessionsSection(props: ArchivedSessionsSectionProps): Re
         const poolDir = poolMatch[1]!
         const repoSlug = poolMatch[2]!
         const branchSeg = poolMatch[3]!
+        const checkoutRoot = `${poolDir}/${branchSeg}`
         const knownRoot = poolToRepoRoot.get(poolDir)
         const strippedSlug = repoSlug.replace(/-[0-9a-f]{8}$/i, '')
-        // Also try matching strippedSlug to a known repo name
         let matchedRoot = knownRoot
         if (matchedRoot === undefined) {
           for (const [root, name] of repoNameByRoot.entries()) {
@@ -225,6 +244,7 @@ export function ArchivedSessionsSection(props: ArchivedSessionsSectionProps): Re
           branchName: branchSeg,
           isGitRepo: true,
           isWorktreeBranch: true,
+          isRemovedCheckout: !activeWorktreePaths.has(checkoutRoot),
         }
       }
 
@@ -233,6 +253,7 @@ export function ArchivedSessionsSection(props: ArchivedSessionsSectionProps): Re
       if (agentsMatch !== null) {
         const repoRoot = agentsMatch[1]!
         const branchSeg = agentsMatch[2]!
+        const checkoutRoot = `${repoRoot}/.agents/worktrees/${branchSeg}`
         return {
           repoKey: repoRoot,
           repoName: repoNameByRoot.get(repoRoot) ?? wsByPath.get(repoRoot)?.title ?? pathBasename(repoRoot),
@@ -240,14 +261,16 @@ export function ArchivedSessionsSection(props: ArchivedSessionsSectionProps): Re
           branchName: branchSeg,
           isGitRepo: true,
           isWorktreeBranch: true,
+          isRemovedCheckout: !activeWorktreePaths.has(checkoutRoot),
         }
       }
 
       // e) Orca external workspace layout: `.../orca/workspaces/<repoName>/<branch>`
-      const orcaMatch = /\/orca\/workspaces\/([^/]+)\/([^/]+)(?:\/|$)/.exec(cwdNorm)
+      const orcaMatch = /^(.*\/orca\/workspaces\/([^/]+)\/([^/]+))(?:\/|$)/.exec(cwdNorm)
       if (orcaMatch !== null) {
-        const repoSlug = orcaMatch[1]!
-        const branchSeg = orcaMatch[2]!
+        const checkoutRoot = orcaMatch[1]!
+        const repoSlug = orcaMatch[2]!
+        const branchSeg = orcaMatch[3]!
         let matchedRoot: string | undefined
         for (const [root, name] of repoNameByRoot.entries()) {
           if (name === repoSlug || pathBasename(root) === repoSlug) {
@@ -262,6 +285,7 @@ export function ArchivedSessionsSection(props: ArchivedSessionsSectionProps): Re
           branchName: branchSeg,
           isGitRepo: true,
           isWorktreeBranch: true,
+          isRemovedCheckout: !activeWorktreePaths.has(checkoutRoot),
         }
       }
 
@@ -274,6 +298,7 @@ export function ArchivedSessionsSection(props: ArchivedSessionsSectionProps): Re
           branchName: activeWt.branch,
           isGitRepo: true,
           isWorktreeBranch: false,
+          isRemovedCheckout: false,
         }
       }
 
@@ -286,6 +311,7 @@ export function ArchivedSessionsSection(props: ArchivedSessionsSectionProps): Re
             branchName: t('archive.folderDirect'),
             isGitRepo: false,
             isWorktreeBranch: false,
+            isRemovedCheckout: false,
           }
         }
       }
@@ -297,6 +323,7 @@ export function ArchivedSessionsSection(props: ArchivedSessionsSectionProps): Re
         branchName: t('archive.folderDirect'),
         isGitRepo: false,
         isWorktreeBranch: false,
+        isRemovedCheckout: false,
       }
     }
 
@@ -324,11 +351,13 @@ export function ArchivedSessionsSection(props: ArchivedSessionsSectionProps): Re
         removedAt?: string
         isGitRepo: boolean
         isWorktreeBranch: boolean
+        isRemovedCheckout: boolean
       }
 
       const explicitRec = archivedBySession.get(sid)
       if (explicitRec !== undefined) {
         const root = explicitRec.repositoryRoot ? normalizePath(explicitRec.repositoryRoot) : undefined
+        const normRecPath = normalizePath(explicitRec.path)
         resolved = {
           repoKey: root ?? `repo:${explicitRec.repositoryName}`,
           repoName: (root ? repoNameByRoot.get(root) : undefined) ?? explicitRec.repositoryName,
@@ -338,6 +367,7 @@ export function ArchivedSessionsSection(props: ArchivedSessionsSectionProps): Re
           removedAt: explicitRec.removedAt,
           isGitRepo: true,
           isWorktreeBranch: true,
+          isRemovedCheckout: !activeWorktreePaths.has(normRecPath),
         }
       } else {
         const cwdRaw = summary.cwd ?? wsBySessionId.get(sid)?.path
@@ -351,6 +381,7 @@ export function ArchivedSessionsSection(props: ArchivedSessionsSectionProps): Re
             branchName: t('archive.folderDirect'),
             isGitRepo: false,
             isWorktreeBranch: false,
+            isRemovedCheckout: false,
           }
         }
       }
@@ -376,6 +407,7 @@ export function ArchivedSessionsSection(props: ArchivedSessionsSectionProps): Re
           path: resolved.path,
           removedAt: resolved.removedAt,
           isWorktreeBranch: resolved.isWorktreeBranch,
+          isRemovedCheckout: resolved.isRemovedCheckout,
           sessions: [],
         }
         repoEntry.branches.set(bKey, branchEntry)
@@ -511,24 +543,32 @@ export function ArchivedSessionsSection(props: ArchivedSessionsSectionProps): Re
           className="owt-btn"
           disabled={loading}
           onClick={() => { void reloadMeta() }}
-          title={t('archive.refresh')}
+          aria-label={t('archive.refreshAria')}
+          title={t('archive.refreshAria')}
         >
-          <IconRefresh size={13} spinning={loading} />
+          <IconRefresh size={12.5} spinning={loading} />
+          <span>{t('archive.refresh')}</span>
         </button>
       </div>
 
       {totalCount > 0 && (
         <div className="owt-arch-search">
-          <IconSearch size={14} />
+          <IconSearch size={13.5} />
           <input
             type="text"
             value={query}
             placeholder={t('archive.searchPlaceholder')}
+            aria-label={t('archive.searchPlaceholder')}
             onChange={event => { setQuery(event.target.value) }}
           />
           {query !== '' && (
-            <button type="button" className="owt-icon-btn" onClick={() => { setQuery('') }}>
-              ✕
+            <button
+              type="button"
+              className="owt-clear-btn"
+              aria-label={t('header.clearSearch')}
+              onClick={() => { setQuery('') }}
+            >
+              <IconClose size={11} />
             </button>
           )}
         </div>
@@ -548,6 +588,9 @@ export function ArchivedSessionsSection(props: ArchivedSessionsSectionProps): Re
         <div className="owt-arch-list">
           {filteredGroups.map(repo => {
             const repoCollapsed = normalizedQuery === '' && collapsedGroups.has(repo.repoKey)
+            const summaryText = repo.isGitRepo
+              ? t('archive.repoSummary', { branches: repo.branches.length, chats: repo.totalSessions })
+              : t('archive.chatsOnlySummary', { chats: repo.totalSessions })
             return (
               <div className="owt-arch-card" key={repo.repoKey}>
                 <div
@@ -563,12 +606,9 @@ export function ArchivedSessionsSection(props: ArchivedSessionsSectionProps): Re
                     }
                   }}
                 >
-                  <IconChevron open={!repoCollapsed} size={13} />
-                  <span className="owt-repo-icon">
-                    <IconFolder size={15} />
-                  </span>
+                  <IconChevron open={!repoCollapsed} size={12} />
                   <span className="owt-arch-repo-name">{repo.repoName}</span>
-                  <span className="owt-dirty-pill">{repo.totalSessions}</span>
+                  <span className="owt-arch-repo-meta">{summaryText}</span>
                 </div>
 
                 {!repoCollapsed && (
@@ -594,10 +634,15 @@ export function ArchivedSessionsSection(props: ArchivedSessionsSectionProps): Re
                                   }
                                 }}
                               >
-                                <IconChevron open={!bCollapsed} size={12} />
-                                <IconLineage size={12} />
+                                <IconChevron open={!bCollapsed} size={11} />
+                                <span className="owt-arch-branch-icon">
+                                  <IconGitBranch size={12.5} />
+                                </span>
                                 <span className="owt-arch-branch-name">{branch.branchName}</span>
-                                <span className="owt-dirty-pill">{branch.sessions.length}</span>
+                                {branch.isRemovedCheckout && (
+                                  <span className="owt-arch-removed-tag">{t('archive.removedTag')}</span>
+                                )}
+                                <span className="owt-count-pill">{branch.sessions.length}</span>
                               </div>
                               {branch.sessions.length > 1 && (
                                 <button
@@ -619,9 +664,14 @@ export function ArchivedSessionsSection(props: ArchivedSessionsSectionProps): Re
                                 const label = sessionDisplayTitle(session, t)
                                 const timeText = formatShortTime(session.updatedAt)
                                 return (
-                                  <div className="owt-arch-session-row" key={session.id}>
-                                    <span className="owt-repo-icon">
-                                      <IconChat size={13} />
+                                  <div
+                                    className="owt-arch-session-row"
+                                    key={session.id}
+                                    data-busy={isBusy ? 'true' : 'false'}
+                                    tabIndex={0}
+                                  >
+                                    <span className="owt-git-icon">
+                                      <IconChat size={12} />
                                     </span>
                                     <div className="owt-arch-session-main" title={`${label}\n${session.cwd ?? ''}`}>
                                       <span className="owt-arch-session-title">{label}</span>

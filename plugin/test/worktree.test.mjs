@@ -245,10 +245,16 @@ test('WorktreeManagerService end-to-end: SRC descriptors, multi-repo overview, l
     assert.equal(initial.value.repos[0].rows[0].branch, 'develop')
     assert.equal(initial.value.repos[0].rows[0].pinned, true)
 
-    // 3. Create worktree from remote branch `origin/release/v1` -> auto-registers DSH Workspace + persists base ref + lineage!
+    // 3. Create top-level worktree (`parentPath === undefined`) AND a child derived from main checkout (`parentPath === repoDir`)!
+    const topWt = await svc.create(repoDir, 'feat_top_level', 'origin/release/v1', undefined)
+    assert.equal(topWt.ok, true)
+    assert.equal(topWt.value.parentPath, undefined, 'repo-level create keeps parentPath undefined (top-level row)')
+    await svc.remove(topWt.value.path, false)
+
     const created1 = await svc.create(repoDir, 'feat_gen_task', 'origin/release/v1', repoDir)
     assert.equal(created1.ok, true)
     assert.equal(created1.value.branch, 'feat_gen_task')
+    assert.equal(created1.value.parentPath, repoDir, 'deriving child from main checkout must preserve repoDir as parentPath')
     assert.ok(created1.value.path.startsWith(process.env.DSH_WORKTREE_POOL), 'worktree must live in the unified pool')
     assert.ok(created1.value.workspaceId, 'created worktree must auto-register a DSH Workspace')
     assert.equal(readFileSync(join(created1.value.path, 'RELEASE.md'), 'utf8'), 'v1\n')
@@ -269,6 +275,7 @@ test('WorktreeManagerService end-to-end: SRC descriptors, multi-repo overview, l
     const genRow = rows.find(r => r.branch === 'feat_gen_task')
     const subRow = rows.find(r => r.branch === 'feat_sub_task')
     assert.equal(genRow.pinned, true)
+    assert.equal(genRow.parentPath, repoDir)
     assert.equal(subRow.parentPath, genRow.path)
 
     // 4b. Physical-nesting fallback: a checkout created outside the plugin
