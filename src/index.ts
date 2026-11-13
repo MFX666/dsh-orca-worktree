@@ -37,10 +37,19 @@ function randomHex6(): string {
 }
 import type {
   ArchivedBranchRecord,
+  WorktreeApplyPatchValue,
   WorktreeArchivedMetaValue,
+  WorktreeBlameCommit,
+  WorktreeBlameLine,
+  WorktreeBlameValue,
   WorktreeBranchesValue,
   WorktreeChangeRow,
+  WorktreeCommitDetailValue,
+  WorktreeCommitRow,
   WorktreeCommitValue,
+  WorktreeCompareValue,
+  WorktreeHunkPatch,
+  WorktreeLogValue,
   WorktreeCreateValue,
   WorktreeDiffValue,
   WorktreeEnsureWorkspaceValue,
@@ -90,6 +99,19 @@ const NOISY_DIFF_PATHSPECS = [
   ':(exclude)package-lock.json',
   ':(exclude)yarn.lock',
 ] as const
+
+// P0 git review: `git log --pretty` with 0x1f field / 0x1e record separators so
+// authors and subjects containing tabs or newlines can never corrupt parsing.
+const LOG_FORMAT = '%H%x1f%h%x1f%an%x1f%ae%x1f%aI%x1f%s%x1f%b%x1e'
+const DEFAULT_LOG_LIMIT = 200
+const MAX_LOG_LIMIT = 1000
+const MAX_BLAME_LINES = 5000
+
+// Tiny node one-liners for file ops `fs()` cannot express (binary copy, temp
+// writes outside sandbox-managed dirs). Same pattern as PREPARE_POOL_SCRIPT.
+const FS_COPY_SCRIPT = "import fs from 'node:fs/promises'; const [src, dst] = process.argv.slice(1); await fs.copyFile(src, dst);\n"
+const FS_WRITE_SCRIPT = "import fs from 'node:fs/promises'; const [dst, text] = process.argv.slice(1); await fs.writeFile(dst, text, 'utf8');\n"
+const FS_UNLINK_SCRIPT = "import fs from 'node:fs/promises'; await Promise.all(process.argv.slice(1).map(p => fs.rm(p, { force: true })));\n"
 
 const PREPARE_POOL_SCRIPT = `
 import fs from 'node:fs/promises';
@@ -257,6 +279,292 @@ function fail(error: unknown): WorktreeEnvelope<never> {
 
 function ok<T>(value: T): WorktreeEnvelope<T> {
   return { ok: true, value: JSON.parse(JSON.stringify(value)) as T }
+}
+
+/** Convert blame's raw `author-time` + `author-tz` into an ISO-8601 string. */
+function isoFromEpoch(ts: string, tz: string): string {
+  const seconds = Number.parseInt(ts, 10)
+  if (!Number.isFinite(seconds) || seconds < 0) return ''
+  const match = /^([+-])(\d{2})(\d{2})$/.exec(tz.trim())
+  const offsetMinutes = match
+    ? (match[1] === '-' ? -1 : 1) * (Number.parseInt(match[2]!, 10) * 60 + Number.parseInt(match[3]!, 10))
+    : 0
+  const shifted = new Date((seconds + offsetMinutes * 60) * 1000)
+  const sign = offsetMinutes < 0 ? '-' : '+'
+  const abs = Math.abs(offsetMinutes)
+  const hh = String(Math.trunc(abs / 60)).padStart(2, '0')
+  const mm = String(abs % 60).padStart(2, '0')
+  return `${shifted.toISOString().slice(0, 19)}${offsetMinutes === 0 ? 'Z' : `${sign}${hh}:${mm}`}`
+}
+
+/** C-quoted git path (e.g. `"spa ce\ttab"`) -> raw path; plain paths pass through. */
+function unquoteGitPath(value: string): string {
+  if (!value.startsWith('"') || value.length < 2) return value
+  let out = ''
+  for (let i = 1; i < value.length; i++) {
+    const ch = value[i]!
+    if (ch === '"') break
+    if (ch !== '\\') {
+      out += ch
+      continue
+    }
+    const next = value[++i]
+    if (next === undefined) break
+    const simple: Record<string, string> = {
+      a: '\x07', b: '\b', f: '\f', n: '\n', r: '\r', t: '\t', v: '\v', '"': '"', '\\': '\\',
+    }
+    if (simple[next] !== undefined) {
+      out += simple[next]!
+      continue
+    }
+    const octal = /^([0-7]{1,3})/.exec(value.slice(i))
+    if (octal) {
+      out += String.fromCharCode(Number.parseInt(octal[1]!, 8))
+      i += octal[1]!.length - 1
+      continue
+    }
+    out += next
+  }
+  return out
+}
+
+/** Validate one patch-side path: repo-relative, no `..` escape, no absolute/drive forms. */
+function safePatchRelPath(rawPath: string): string | undefined {
+  let p = unquoteGitPath(rawPath).trim()
+  if (p.length === 0 || p === '/dev/null' || p.startsWith('-')) return undefined
+  p = p.replace(/\\/g, '/')
+  if (p.startsWith('/') || /^[A-Za-z]:/.test(p)) return undefined
+  const segments: string[] = []
+  for (const segment of p.split('/')) {
+    if (segment.length === 0 || segment === '.') continue
+    if (segment === '..') {
+      if (segments.length === 0) return undefined
+      segments.pop()
+      continue
+    }
+    segments.push(segment)
+  }
+  if (segments.length === 0) return undefined
+  return segments.join('/')
+}
+
+/** Repo-relative paths a patch touches; throws WORKTREE_APPLY_FAILED on any escape attempt. */
+function patchPathsOf(patch: string): string[] {
+  const found = new Set<string>()
+  const require = (rawPath: string): void => {
+    // Strip the conventional a/ b/ prefixes so the result is a worktree-relative
+    // path usable for `git add -N`; validation still applies to the stripped form.
+    const stripped = /^[ab]\//.test(rawPath) ? rawPath.slice(2) : rawPath
+    const rel = safePatchRelPath(stripped)
+    if (rel === undefined) {
+      throw new WorktreeError('WORKTREE_APPLY_FAILED', `patch path escapes the worktree: ${JSON.stringify(rawPath)}`)
+    }
+    found.add(rel)
+  }
+  for (const rawLine of patch.split('\n')) {
+    const line = rawLine.replace(/\r$/, '')
+    if (line.startsWith('--- ') || line.startsWith('+++ ')) {
+      const p = line.slice(4).split('\t')[0] ?? ''
+      if (p === '/dev/null') continue
+      require(p)
+      continue
+    }
+    if (line.startsWith('rename from ') || line.startsWith('copy from ')) {
+      require(line.slice('rename from '.length))
+      continue
+    }
+    if (line.startsWith('rename to ')) {
+      require(line.slice('rename to '.length))
+      continue
+    }
+    if (line.startsWith('copy to ')) {
+      require(line.slice('copy to '.length))
+      continue
+    }
+    if (line.startsWith('diff --git ')) {
+      // Best-effort pair split (---/+++ headers above cover plain cases).
+      const parts = /^(?:"([^"]*)"|(\S+)) (?:"([^"]*)"|(\S+))$/.exec(line.slice('diff --git '.length))
+      if (parts) {
+        for (const raw of [parts[1] ?? parts[2], parts[3] ?? parts[4]]) {
+          const rawPath = raw ?? ''
+          if (rawPath.length > 0 && rawPath !== '/dev/null') {
+            const rel = safePatchRelPath(rawPath)
+            if (rel !== undefined) found.add(rel)
+          }
+        }
+      }
+    }
+  }
+  return [...found]
+}
+
+/** Truncate to a character budget on a line boundary. */
+function truncateChars(text: string, maxChars: number): { text: string; truncated: boolean } {
+  if (text.length <= maxChars) return { text, truncated: false }
+  const nl = text.lastIndexOf('\n', maxChars)
+  return { text: nl > 0 ? text.slice(0, nl + 1) : text.slice(0, maxChars), truncated: true }
+}
+
+/** Unified multi-file diff text with diffTextOf-style budget + per-file sectioning. */
+function sectionedDiffText(
+  raw: string,
+  wasLossy: boolean,
+  maxChars: number,
+): { diff: string; truncated: boolean } {
+  let total = 0
+  let truncated = wasLossy
+  const parts: string[] = []
+  const perFileCap = Math.min(PER_FILE_DIFF_CHARS, maxChars)
+  const appendSection = (section: string): boolean => {
+    if (total >= maxChars) {
+      truncated = true
+      return false
+    }
+    let text = section
+    if (total + text.length > maxChars) {
+      const cut = Math.max(0, maxChars - total)
+      const nl = text.lastIndexOf('\n', cut - 1)
+      text = nl > 0 ? text.slice(0, nl + 1) : text.slice(0, cut)
+      truncated = true
+    }
+    if (text.length > perFileCap) {
+      const nl = text.lastIndexOf('\n', perFileCap - 1)
+      text = nl > 0 ? text.slice(0, nl + 1) : text.slice(0, perFileCap)
+      truncated = true
+    }
+    if (text.length > 0) {
+      parts.push(text)
+      total += text.length
+    }
+    return total < maxChars
+  }
+  let start = 0
+  while (start < raw.length) {
+    const next = raw.indexOf('\ndiff --git ', start)
+    const section = next >= 0 ? raw.slice(start, next + 1) : raw.slice(start)
+    if (!appendSection(section)) break
+    if (next < 0) break
+    start = next + 1
+  }
+  return { diff: parts.join(''), truncated }
+}
+
+/** Parse `git log --pretty=format:${LOG_FORMAT}` output into contract rows. */
+function parseCommitLogRows(stdout: string): WorktreeCommitRow[] {
+  const rows: WorktreeCommitRow[] = []
+  for (const segment of stdout.split('\u001e')) {
+    const record = segment.replace(/^\n/, '')
+    if (record.trim().length === 0) continue
+    const fields = record.split('\u001f')
+    if (fields.length < 6) continue
+    const body = (fields[6] ?? '').replace(/\n+$/, '')
+    rows.push({
+      hash: fields[0]!,
+      shortHash: fields[1]!,
+      author: fields[2]!,
+      email: fields[3]!,
+      date: fields[4]!,
+      subject: fields[5]!,
+      ...(body.length > 0 ? { body } : {}),
+    })
+  }
+  return rows
+}
+
+/** Parse `git diff-tree --name-status` TSV (`old\tnew`, old first). */
+function parseNameStatusText(stdout: string): WorktreeChangeRow[] {
+  const rows: WorktreeChangeRow[] = []
+  for (const line of stdout.split('\n')) {
+    if (line.length === 0) continue
+    const [status = '', oldPath = '', newPath = ''] = line.split('\t')
+    if (status.length === 0) continue
+    const renameOrCopy = status.startsWith('R') || status.startsWith('C')
+    const file = renameOrCopy ? newPath : oldPath
+    if (file.length === 0) continue
+    rows.push({
+      file,
+      status,
+      staged: true,
+      untracked: false,
+      ...(renameOrCopy && oldPath.length > 0 ? { oldFile: oldPath } : {}),
+    })
+  }
+  return rows
+}
+
+/** Parse `git diff --name-status -z` NUL stream (`status\0old\0new`, old first). */
+function parseNameStatusZ(stdout: string): WorktreeChangeRow[] {
+  const rows: WorktreeChangeRow[] = []
+  const tokens = stdout.split('\0')
+  for (let i = 0; i < tokens.length; i++) {
+    const status = tokens[i]!
+    if (status.length === 0) continue
+    const renameOrCopy = status.startsWith('R') || status.startsWith('C')
+    const oldFile = tokens[i + 1] ?? ''
+    const file = renameOrCopy ? tokens[i + 2] ?? '' : oldFile
+    if (file.length === 0) continue
+    i += renameOrCopy ? 2 : 1
+    rows.push({
+      file,
+      status,
+      staged: true,
+      untracked: false,
+      ...(renameOrCopy && oldFile.length > 0 ? { oldFile } : {}),
+    })
+  }
+  return rows
+}
+
+/** Parse `git blame --porcelain` into deduped commits + per-line entries. */
+function parseBlamePorcelain(stdout: string): {
+  commits: WorktreeBlameCommit[]
+  lines: WorktreeBlameLine[]
+  truncated: boolean
+} {
+  const commits: WorktreeBlameCommit[] = []
+  const indexByHash = new Map<string, number>()
+  const lines: WorktreeBlameLine[] = []
+  let truncated = false
+  let pending: { hash: string; oldNo: number; newNo: number } | undefined
+  let meta: { author: string; time: string; tz: string; subject: string } = { author: '', time: '', tz: '', subject: '' }
+  const emit = (code: string): void => {
+    if (pending === undefined) return
+    let idx = indexByHash.get(pending.hash)
+    if (idx === undefined) {
+      idx = commits.length
+      indexByHash.set(pending.hash, idx)
+      commits.push({
+        hash: pending.hash,
+        author: meta.author,
+        date: isoFromEpoch(meta.time, meta.tz),
+        subject: meta.subject,
+      })
+    }
+    if (lines.length < MAX_BLAME_LINES) {
+      lines.push({ commit: idx, oldNo: pending.oldNo, newNo: pending.newNo, code })
+    } else {
+      truncated = true
+    }
+    pending = undefined
+  }
+  for (const raw of stdout.split('\n')) {
+    const header = /^([0-9a-f]{40,64}) (\d+) (\d+)(?: \d+)?$/.exec(raw)
+    if (header) {
+      emit('') // straggler entry without a content line (should not happen)
+      pending = { hash: header[1]!, oldNo: Number.parseInt(header[2]!, 10), newNo: Number.parseInt(header[3]!, 10) }
+      meta = { author: '', time: '', tz: '', subject: '' }
+      continue
+    }
+    if (raw.startsWith('\t')) {
+      emit(raw.slice(1))
+      continue
+    }
+    if (raw.startsWith('author ')) meta.author = raw.slice('author '.length)
+    else if (raw.startsWith('author-time ')) meta.time = raw.slice('author-time '.length)
+    else if (raw.startsWith('author-tz ')) meta.tz = raw.slice('author-tz '.length)
+    else if (raw.startsWith('summary ')) meta.subject = raw.slice('summary '.length)
+  }
+  return { commits, lines, truncated }
 }
 
 export default class WorktreeManagerService extends TypertRemoteService {
@@ -534,27 +842,99 @@ export default class WorktreeManagerService extends TypertRemoteService {
     }
   }
 
-  /** Commit the working tree with `message`, staging exactly `files` when provided. */
+  /** Commit the working tree with `message`, staging exactly `files`, or only the selected `hunks` via a throwaway temp index (the user's real index and worktree stay untouched). */
   @Remote('commit')
   async commit(
     path: string,
     message: string,
     files: readonly string[] | undefined,
+    hunks: readonly WorktreeHunkPatch[] | undefined,
     signal?: AbortSignal,
   ): Promise<WorktreeEnvelope<WorktreeCommitValue>> {
     try {
-      const value = await this.commitInternal({ mode: 'danger-full-access' }, path, message, files, signal)
+      const value = await this.commitInternal({ mode: 'danger-full-access' }, path, message, files, hunks, signal)
       return ok(value)
     } catch (error) {
       return fail(error)
     }
   }
 
-  /** Push the current branch to its upstream, establishing one via `-u` when missing. */
+  /** Push the current branch to its upstream, establishing one via `-u` when missing; `forceWithLease` performs a safe force push. */
   @Remote('push')
-  async push(path: string, signal?: AbortSignal): Promise<WorktreeEnvelope<WorktreePushValue>> {
+  async push(
+    path: string,
+    forceWithLease: boolean | undefined,
+    signal?: AbortSignal,
+  ): Promise<WorktreeEnvelope<WorktreePushValue>> {
     try {
-      const value = await this.pushInternal({ mode: 'danger-full-access' }, path, signal)
+      const value = await this.pushInternal({ mode: 'danger-full-access' }, path, forceWithLease === true, signal)
+      return ok(value)
+    } catch (error) {
+      return fail(error)
+    }
+  }
+
+  /** Commit history for the branch range or a single file, newest first, ISO dates. */
+  @Remote('log')
+  async log(
+    path: string,
+    refRange: string | undefined,
+    file: string | undefined,
+    limit: number | undefined,
+    signal?: AbortSignal,
+  ): Promise<WorktreeEnvelope<WorktreeLogValue>> {
+    try {
+      const value = await this.logInternal({ mode: 'danger-full-access' }, path, refRange, file, limit, signal)
+      return ok(value)
+    } catch (error) {
+      return fail(error)
+    }
+  }
+
+  /** One commit's changed files (changesOf semantics) plus its unified diff. */
+  @Remote('showCommit')
+  async showCommit(path: string, hash: string, signal?: AbortSignal): Promise<WorktreeEnvelope<WorktreeCommitDetailValue>> {
+    try {
+      const value = await this.showCommitInternal({ mode: 'danger-full-access' }, path, hash, signal)
+      return ok(value)
+    } catch (error) {
+      return fail(error)
+    }
+  }
+
+  /** Commits, changes and diff between `ref` (inclusive) and HEAD (three-dot). */
+  @Remote('compare')
+  async compare(path: string, ref: string, signal?: AbortSignal): Promise<WorktreeEnvelope<WorktreeCompareValue>> {
+    try {
+      const value = await this.compareInternal({ mode: 'danger-full-access' }, path, ref, signal)
+      return ok(value)
+    } catch (error) {
+      return fail(error)
+    }
+  }
+
+  /** Line-by-line attribution of one file via `git blame --porcelain`. */
+  @Remote('blame')
+  async blame(path: string, file: string, signal?: AbortSignal): Promise<WorktreeEnvelope<WorktreeBlameValue>> {
+    try {
+      const value = await this.blameInternal({ mode: 'danger-full-access' }, path, file, signal)
+      return ok(value)
+    } catch (error) {
+      return fail(error)
+    }
+  }
+
+  /** Apply a unified patch to the worktree, the index (--cached), or reversed. */
+  @Remote('applyPatch')
+  async applyPatch(
+    path: string,
+    patch: string,
+    cached: boolean | undefined,
+    reverse: boolean | undefined,
+    signal?: AbortSignal,
+  ): Promise<WorktreeEnvelope<WorktreeApplyPatchValue>> {
+    try {
+      const value = await this.applyPatchInternal({ mode: 'danger-full-access' }, path, patch, cached, reverse, signal)
       return ok(value)
     } catch (error) {
       return fail(error)
@@ -1172,6 +1552,7 @@ export default class WorktreeManagerService extends TypertRemoteService {
     path: string,
     message: string,
     files: readonly string[] | undefined,
+    hunks?: readonly WorktreeHunkPatch[] | undefined,
     signal?: AbortSignal,
   ): Promise<WorktreeCommitValue> {
     const trimmed = message.replace(/^\s+|\s+$/g, '')
@@ -1179,20 +1560,111 @@ export default class WorktreeManagerService extends TypertRemoteService {
     if (files !== undefined && (files.length === 0 || files.some(f => typeof f !== 'string' || f.length === 0 || f.startsWith('-')))) {
       throw new WorktreeError('WORKTREE_COMMIT_FAILED', 'invalid file list')
     }
+    const hunkList: WorktreeHunkPatch[] = []
+    if (hunks !== undefined) {
+      if (!Array.isArray(hunks)) throw new WorktreeError('WORKTREE_COMMIT_FAILED', 'invalid hunk list')
+      for (const rawHunk of hunks as readonly unknown[]) {
+        // RPC payloads are untrusted at runtime even though the type says otherwise.
+        const hunk = rawHunk as Partial<WorktreeHunkPatch> | null
+        if (
+          hunk === null || typeof hunk !== 'object' ||
+          typeof hunk.file !== 'string' || hunk.file.length === 0 || hunk.file.startsWith('-') ||
+          typeof hunk.patch !== 'string' || hunk.patch.trim().length === 0
+        ) {
+          throw new WorktreeError('WORKTREE_COMMIT_FAILED', 'invalid hunk patch')
+        }
+        hunkList.push({ file: hunk.file, patch: hunk.patch })
+      }
+    }
     const canonical = await this.canonicalWorktreePath(policy, path, signal)
     const run = this.gitRunner(policy, signal)
-    if (files !== undefined) {
-      // Stage exactly the selected files (including untracked), then `--only` commits
-      // precisely them so pre-staged-but-unselected index content stays untouched.
-      await run(canonical, ['add', '--', ...files]).catch(error => {
-        throw new WorktreeError('WORKTREE_COMMIT_FAILED', error instanceof Error ? error.message : String(error))
-      })
+    if (hunkList.length === 0) {
+      if (files !== undefined) {
+        // Stage exactly the selected files (including untracked), then `--only` commits
+        // precisely them so pre-staged-but-unselected index content stays untouched.
+        await run(canonical, ['add', '--', ...files]).catch(error => {
+          throw new WorktreeError('WORKTREE_COMMIT_FAILED', error instanceof Error ? error.message : String(error))
+        })
+      }
+      try {
+        await run(canonical, ['commit', '-m', trimmed, ...(files !== undefined ? ['--only', '--', ...files] : [])])
+      } catch (error) {
+        const text = error instanceof Error ? error.message : String(error)
+        throw new WorktreeError('WORKTREE_COMMIT_FAILED', text)
+      }
+      const short = await run(canonical, ['rev-parse', '--short=7', 'HEAD'], [0, 128])
+      const summary = await run(canonical, ['log', '-1', '--pretty=%s'], [0, 128])
+      const branch = (await this.branchOf(policy, canonical, signal)) ?? 'detached'
+      return {
+        path: canonical,
+        commit: short.stdout.trim(),
+        summary: summary.stdout.trim(),
+        branch,
+      }
     }
+    // -------------------------------------------------------------------
+    // Selected-hunk commit through a throwaway index: the user's real index
+    // and worktree stay completely untouched (only HEAD moves).
+    // -------------------------------------------------------------------
+    const realIndex = await this.gitPathOf(run, canonical, 'index')
+    const tmpIndex = await this.gitPathOf(run, canonical, `owt-commit-${randomHex6()}.index`)
+    const runIdx = this.gitRunner(policy, signal, COMMAND_TIMEOUT_MS, { GIT_INDEX_FILE: tmpIndex })
+    const patchFiles: string[] = []
     try {
-      await run(canonical, ['commit', '-m', trimmed, ...(files !== undefined ? ['--only', '--', ...files] : [])])
-    } catch (error) {
-      const text = error instanceof Error ? error.message : String(error)
-      throw new WorktreeError('WORKTREE_COMMIT_FAILED', text)
+      try {
+        await this.runFsScript(policy, canonical, FS_COPY_SCRIPT, [realIndex, tmpIndex], signal)
+      } catch {
+        // Unborn HEAD (no index file yet): start the temp index empty.
+        await runIdx(canonical, ['read-tree', '--empty']).catch(error => {
+          throw new WorktreeError('WORKTREE_COMMIT_FAILED', error instanceof Error ? error.message : String(error))
+        })
+      }
+      if (files !== undefined) {
+        await runIdx(canonical, ['add', '--', ...files]).catch(error => {
+          throw new WorktreeError('WORKTREE_COMMIT_FAILED', error instanceof Error ? error.message : String(error))
+        })
+      }
+      const wholeFileAdded = new Set<string>(files ?? [])
+      const untracked = new Set(
+        (await runIdx(canonical, ['ls-files', '--others', '--exclude-standard', '-z'], [0], true))
+          .stdout.split('\0')
+          .filter(Boolean),
+      )
+      for (const hunk of hunkList) {
+        if (wholeFileAdded.has(hunk.file)) continue // whole file already staged; a hunk patch would double-apply
+        if (untracked.has(hunk.file)) {
+          try {
+            // Untracked file: intent-to-add plants an empty pre-image blob in the
+            // TEMP index so the hunk patch can `apply --cached`; real index untouched.
+            await runIdx(canonical, ['add', '--intent-to-add', '--', hunk.file])
+          } catch {
+            // Contract fallback: when intent-to-add is blocked, degrade the hunk to a
+            // whole-file add so the change is still captured.
+            await runIdx(canonical, ['add', '--', hunk.file]).catch(error => {
+              throw new WorktreeError('WORKTREE_APPLY_FAILED', error instanceof Error ? error.message : String(error))
+            })
+            wholeFileAdded.add(hunk.file)
+            continue
+          }
+        }
+        const normalizedPatch = hunk.patch.endsWith('\n') ? hunk.patch : `${hunk.patch}\n`
+        patchPathsOf(normalizedPatch) // directory-escape guard -> WORKTREE_APPLY_FAILED
+        const tmpPatch = await this.gitPathOf(runIdx, canonical, `owt-hunk-${randomHex6()}.diff`)
+        patchFiles.push(tmpPatch)
+        await this.runFsScript(policy, canonical, FS_WRITE_SCRIPT, [tmpPatch, normalizedPatch], signal)
+        await runIdx(canonical, ['apply', '--cached', '--whitespace=nowarn', tmpPatch]).catch(error => {
+          throw new WorktreeError('WORKTREE_APPLY_FAILED', error instanceof Error ? error.message : String(error))
+        })
+      }
+      try {
+        await runIdx(canonical, ['commit', '-m', trimmed])
+      } catch (error) {
+        const text = error instanceof Error ? error.message : String(error)
+        throw new WorktreeError('WORKTREE_COMMIT_FAILED', text)
+      }
+    } finally {
+      // Never leak the temp index or hunk patch files into the git dir.
+      await this.runFsScript(policy, canonical, FS_UNLINK_SCRIPT, [tmpIndex, ...patchFiles], undefined).catch(() => {})
     }
     const short = await run(canonical, ['rev-parse', '--short=7', 'HEAD'], [0, 128])
     const summary = await run(canonical, ['log', '-1', '--pretty=%s'], [0, 128])
@@ -1208,6 +1680,7 @@ export default class WorktreeManagerService extends TypertRemoteService {
   private async pushInternal(
     policy: { mode: string },
     path: string,
+    forceWithLease: boolean | undefined,
     signal?: AbortSignal,
   ): Promise<WorktreePushValue> {
     const canonical = await this.canonicalWorktreePath(policy, path, signal)
@@ -1217,7 +1690,9 @@ export default class WorktreeManagerService extends TypertRemoteService {
     const existingUpstream = upstreamRes.exitCode === 0 ? upstreamRes.stdout.trim() : ''
     if (existingUpstream.length > 0) {
       // Plain push; a non-fast-forward surfaces the remote's rejection verbatim.
-      await run(canonical, ['push']).catch(error => {
+      // --force-with-lease (browser opt-in) fails instead when the remote moved
+      // beyond the local reflog view, i.e. safe force push.
+      await run(canonical, ['push', ...(forceWithLease === true ? ['--force-with-lease'] : [])]).catch(error => {
         throw new WorktreeError('WORKTREE_PUSH_FAILED', error instanceof Error ? error.message : String(error))
       })
       return { path: canonical, branch, upstream: existingUpstream }
@@ -1302,6 +1777,237 @@ export default class WorktreeManagerService extends TypertRemoteService {
       throw new WorktreeError('WORKTREE_LLM_UNAVAILABLE', 'model returned an empty commit message')
     }
     return { path: canonical, message: cleaned, provider, model }
+  }
+
+  // ---------------------------------------------------------------------
+  // P0 git review internals (log / showCommit / compare / blame / applyPatch)
+  // ---------------------------------------------------------------------
+
+  /** Resolve a git-dir-relative path (e.g. `index`, temp patch) to an absolute path. */
+  private async gitPathOf(
+    run: ReturnType<WorktreeManagerService['gitRunner']>,
+    canonical: string,
+    name: string,
+  ): Promise<string> {
+    const resolved = await run(canonical, ['rev-parse', '--git-path', name])
+    const p = resolved.stdout.trim()
+    return p.startsWith('/') ? p : `${canonical}/${p}`
+  }
+
+  /** Run a tiny node script (PREPARE_POOL_SCRIPT pattern) for file ops fs() can't express. */
+  private async runFsScript(
+    policy: { mode: string },
+    cwd: string,
+    script: string,
+    args: readonly string[],
+    signal: AbortSignal | undefined,
+  ): Promise<void> {
+    await this.runArgv(policy, cwd, ['node', '--input-type=module', '-e', script, ...args], COMMAND_TIMEOUT_MS, signal, [0])
+  }
+
+  private async commitRowsOf(
+    run: ReturnType<WorktreeManagerService['gitRunner']>,
+    canonical: string,
+    extraArgs: readonly string[],
+    limit: number,
+  ): Promise<{ commits: WorktreeCommitRow[]; truncated: boolean }> {
+    const res = await run(
+      canonical,
+      ['log', `--pretty=format:${LOG_FORMAT}`, '--date=iso-strict', `--max-count=${limit + 1}`, ...extraArgs],
+      [0],
+      true,
+    ).catch(error => {
+      throw new WorktreeError('WORKTREE_LOG_FAILED', error instanceof Error ? error.message : String(error))
+    })
+    const rows = parseCommitLogRows(res.stdout)
+    // One extra row was requested purely to detect truncation.
+    return { commits: rows.slice(0, limit), truncated: res.lossy || rows.length > limit }
+  }
+
+  private async logInternal(
+    policy: { mode: string },
+    path: string,
+    refRange: string | undefined,
+    file: string | undefined,
+    limit: number | undefined,
+    signal?: AbortSignal,
+  ): Promise<WorktreeLogValue> {
+    for (const rev of [refRange, file]) {
+      if (rev !== undefined && (rev.length === 0 || rev.startsWith('-') || rev.length > 512)) {
+        throw new WorktreeError('WORKTREE_LOG_FAILED', `invalid argument: ${JSON.stringify(rev)}`)
+      }
+    }
+    const requested = Math.trunc(Number(limit ?? DEFAULT_LOG_LIMIT))
+    const bounded = Number.isFinite(requested)
+      ? Math.min(Math.max(requested, 1), MAX_LOG_LIMIT)
+      : DEFAULT_LOG_LIMIT
+    const canonical = await this.canonicalWorktreePath(policy, path, signal)
+    const run = this.gitRunner(policy, signal)
+    const args = ['log', `--pretty=format:${LOG_FORMAT}`, '--date=iso-strict', `--max-count=${bounded + 1}`]
+    if (refRange !== undefined) args.push(refRange)
+    if (file !== undefined) args.push('--follow', '--', file)
+    // Unborn HEAD (exit 128) with no selector just means: nothing logged yet.
+    const unbornOk = refRange === undefined && file === undefined
+    const res = await run(canonical, args, unbornOk ? [0, 128] : [0], true).catch(error => {
+      throw new WorktreeError('WORKTREE_LOG_FAILED', error instanceof Error ? error.message : String(error))
+    })
+    if (res.exitCode === 128) return { path: canonical, commits: [] }
+    const rows = parseCommitLogRows(res.stdout)
+    const truncated = res.lossy || rows.length > bounded
+    return { path: canonical, commits: rows.slice(0, bounded), ...(truncated ? { truncated: true } : {}) }
+  }
+
+  private async showCommitInternal(
+    policy: { mode: string },
+    path: string,
+    hash: string,
+    signal?: AbortSignal,
+  ): Promise<WorktreeCommitDetailValue> {
+    if (!/^[0-9a-f]{7,64}$/i.test(hash)) {
+      throw new WorktreeError('WORKTREE_DIFF_FAILED', `invalid commit hash: ${JSON.stringify(hash)}`)
+    }
+    const canonical = await this.canonicalWorktreePath(policy, path, signal)
+    const run = this.gitRunner(policy, signal)
+    const branch = (await this.branchOf(policy, canonical, signal)) ?? 'detached'
+    // Name-status via diff-tree so `staged: true` rows reuse changesOf semantics;
+    // --root makes the initial commit list its files instead of showing nothing.
+    const nameStatus = await run(
+      canonical,
+      ['diff-tree', '--no-commit-id', '--name-status', '-r', '-M', '--root', hash],
+      [0],
+      true,
+    ).catch(error => {
+      throw new WorktreeError('WORKTREE_DIFF_FAILED', error instanceof Error ? error.message : String(error))
+    })
+    const changes = parseNameStatusText(nameStatus.stdout)
+    const shown = await run(
+      canonical,
+      ['show', '--format=', '--no-color', '--no-ext-diff', '--diff-merges=off', hash, '--', '.', ...NOISY_DIFF_PATHSPECS],
+      [0],
+      true,
+    ).catch(error => {
+      throw new WorktreeError('WORKTREE_DIFF_FAILED', error instanceof Error ? error.message : String(error))
+    })
+    const { text, truncated } = truncateChars(shown.stdout, MAX_DIFF_CHARS)
+    return {
+      path: canonical,
+      hash,
+      branch,
+      changes,
+      diff: text,
+      ...(truncated || shown.lossy ? { truncated: true } : {}),
+    }
+  }
+
+  private async compareInternal(
+    policy: { mode: string },
+    path: string,
+    ref: string,
+    signal?: AbortSignal,
+  ): Promise<WorktreeCompareValue> {
+    if (ref.length === 0 || ref.startsWith('-') || /\s/.test(ref) || ref.length > 256) {
+      throw new WorktreeError('WORKTREE_DIFF_FAILED', `invalid ref: ${JSON.stringify(ref)}`)
+    }
+    const canonical = await this.canonicalWorktreePath(policy, path, signal)
+    const run = this.gitRunner(policy, signal)
+    const branch = (await this.branchOf(policy, canonical, signal)) ?? 'detached'
+    const verify = await run(canonical, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], [0, 1])
+    if (verify.exitCode !== 0) {
+      throw new WorktreeError('WORKTREE_DIFF_FAILED', `unknown ref: ${ref}`)
+    }
+    const { commits, truncated: commitsTruncated } = await this.commitRowsOf(run, canonical, [`${ref}..HEAD`], DEFAULT_LOG_LIMIT)
+    const nameStatus = await run(canonical, ['diff', '--name-status', '-z', '-M', `${ref}...HEAD`], [0], true).catch(error => {
+      throw new WorktreeError('WORKTREE_DIFF_FAILED', error instanceof Error ? error.message : String(error))
+    })
+    const changes = parseNameStatusZ(nameStatus.stdout)
+    const ranged = await run(
+      canonical,
+      ['diff', '--no-color', '--no-ext-diff', `${ref}...HEAD`, '--', '.', ...NOISY_DIFF_PATHSPECS],
+      [0],
+      true,
+    ).catch(error => {
+      throw new WorktreeError('WORKTREE_DIFF_FAILED', error instanceof Error ? error.message : String(error))
+    })
+    const { diff, truncated: diffTruncated } = sectionedDiffText(ranged.stdout, ranged.lossy, MAX_DIFF_CHARS)
+    return {
+      path: canonical,
+      branch,
+      ref,
+      commits,
+      changes,
+      diff,
+      ...(commitsTruncated || diffTruncated ? { truncated: true } : {}),
+    }
+  }
+
+  private async blameInternal(
+    policy: { mode: string },
+    path: string,
+    file: string,
+    signal?: AbortSignal,
+  ): Promise<WorktreeBlameValue> {
+    if (file.length === 0 || file.startsWith('-')) {
+      throw new WorktreeError('WORKTREE_BLAME_FAILED', `invalid file path: ${JSON.stringify(file)}`)
+    }
+    const canonical = await this.canonicalWorktreePath(policy, path, signal)
+    const run = this.gitRunner(policy, signal)
+    const blamed = await run(canonical, ['blame', '--porcelain', '--', file], [0], true).catch(error => {
+      throw new WorktreeError('WORKTREE_BLAME_FAILED', error instanceof Error ? error.message : String(error))
+    })
+    const parsed = parseBlamePorcelain(blamed.stdout)
+    return {
+      path: canonical,
+      file,
+      commits: parsed.commits,
+      lines: parsed.lines,
+      ...(parsed.truncated || blamed.lossy ? { truncated: true } : {}),
+    }
+  }
+
+  private async applyPatchInternal(
+    policy: { mode: string },
+    path: string,
+    patch: string,
+    cached: boolean | undefined,
+    reverse: boolean | undefined,
+    signal?: AbortSignal,
+  ): Promise<WorktreeApplyPatchValue> {
+    if (typeof patch !== 'string' || patch.trim().length === 0) {
+      throw new WorktreeError('WORKTREE_APPLY_FAILED', 'patch is empty')
+    }
+    const normalizedPatch = patch.endsWith('\n') ? patch : `${patch}\n`
+    const touched = patchPathsOf(normalizedPatch) // directory-escape guard -> WORKTREE_APPLY_FAILED
+    const canonical = await this.canonicalWorktreePath(policy, path, signal)
+    const run = this.gitRunner(policy, signal)
+    const tmpPatch = await this.gitPathOf(run, canonical, `owt-patch-${randomHex6()}.diff`)
+    try {
+      await this.runFsScript(policy, canonical, FS_WRITE_SCRIPT, [tmpPatch, normalizedPatch], signal)
+      if (cached === true && reverse !== true) {
+        // Untracked files have no index blob to diff against: record intent-to-add
+        // (empty blob) so `git apply --cached` can stage the patch content.
+        const untracked = new Set(
+          (await run(canonical, ['ls-files', '--others', '--exclude-standard', '-z'], [0], true))
+            .stdout.split('\0')
+            .filter(Boolean),
+        )
+        for (const rel of touched) {
+          if (!untracked.has(rel)) continue
+          await run(canonical, ['add', '--intent-to-add', '--', rel]).catch(error => {
+            throw new WorktreeError('WORKTREE_APPLY_FAILED', error instanceof Error ? error.message : String(error))
+          })
+        }
+      }
+      const args = ['apply', '--whitespace=nowarn']
+      if (reverse === true) args.push('--reverse')
+      if (cached === true) args.push('--cached')
+      args.push(tmpPatch)
+      await run(canonical, args).catch(error => {
+        throw new WorktreeError('WORKTREE_APPLY_FAILED', error instanceof Error ? error.message : String(error))
+      })
+      return { path: canonical }
+    } finally {
+      await this.runFsScript(policy, canonical, FS_UNLINK_SCRIPT, [tmpPatch], undefined).catch(() => {})
+    }
   }
 
   // ---------------------------------------------------------------------
@@ -1424,7 +2130,7 @@ export default class WorktreeManagerService extends TypertRemoteService {
           if (typeof args.message !== 'string' || args.message.trim().length === 0) throw new Error('message is required')
           const files = Array.isArray(args.files) ? args.files.filter((f): f is string => typeof f === 'string') : undefined
           return JSON.parse(
-            JSON.stringify(await self.commitInternal(self.policy(exec.agent), args.path, args.message, files, exec.signal)),
+            JSON.stringify(await self.commitInternal(self.policy(exec.agent), args.path, args.message, files, undefined, exec.signal)),
           )
         },
       },
@@ -1745,6 +2451,7 @@ process.stdout.write(row && typeof row.payload === 'string' ? row.payload : '{}'
     signal: AbortSignal | undefined,
     allowedExitCodes: readonly number[] = [0],
     allowLossy = false,
+    extraEnv: Record<string, string | undefined> = {},
   ): Promise<{ stdout: string; exitCode: number; lossy: boolean }> {
     const signals: AbortSignal[] = [AbortSignal.timeout(timeoutMs)]
     if (signal !== undefined) signals.push(signal)
@@ -1761,7 +2468,7 @@ process.stdout.write(row && typeof row.payload === 'string' ? row.payload : '{}'
     const child = host.subprocess.spawn({
       argv: command,
       cwd,
-      env: { ...GIT_ENV, GIT_TERMINAL_PROMPT: '0', GIT_LFS_SKIP_SMUDGE: '1', GIT_NO_LAZY_FETCH: '1' },
+      env: { ...GIT_ENV, GIT_TERMINAL_PROMPT: '0', GIT_LFS_SKIP_SMUDGE: '1', GIT_NO_LAZY_FETCH: '1', ...extraEnv },
       signal: timeoutSignal,
       graceMs: COMMAND_GRACE_MS,
       stdio: { stdin: 'ignore', stdout: { maxBytes: stdoutCap }, stderr: { maxBytes: MAX_OUTPUT_BYTES } },
@@ -1783,7 +2490,12 @@ process.stdout.write(row && typeof row.payload === 'string' ? row.payload : '{}'
     }
   }
 
-  private gitRunner(policy: { mode: string }, signal: AbortSignal | undefined, timeoutMs = COMMAND_TIMEOUT_MS) {
+  private gitRunner(
+    policy: { mode: string },
+    signal: AbortSignal | undefined,
+    timeoutMs = COMMAND_TIMEOUT_MS,
+    extraEnv: Record<string, string | undefined> = {},
+  ) {
     return (cwd: string, args: readonly string[], allowedExitCodes: readonly number[] = [0], allowLossy = false) =>
       this.runArgv(
         policy,
@@ -1793,6 +2505,7 @@ process.stdout.write(row && typeof row.payload === 'string' ? row.payload : '{}'
         signal,
         allowedExitCodes,
         allowLossy,
+        extraEnv,
       )
   }
 

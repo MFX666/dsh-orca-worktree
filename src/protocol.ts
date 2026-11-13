@@ -17,6 +17,9 @@ export type WorktreeErrorCode =
   | 'WORKTREE_NOT_A_REPO'
   | 'WORKTREE_TIMEOUT'
   | 'WORKTREE_DIFF_FAILED'
+  | 'WORKTREE_LOG_FAILED'
+  | 'WORKTREE_APPLY_FAILED'
+  | 'WORKTREE_BLAME_FAILED'
   | 'WORKTREE_COMMIT_FAILED'
   | 'WORKTREE_PUSH_FAILED'
   | 'WORKTREE_LLM_UNAVAILABLE'
@@ -191,6 +194,82 @@ export interface WorktreePushValue {
   readonly branch: string
   /** Upstream ref after the push (e.g. `origin/develop`), set when `-u` established it. */
   readonly upstream: string
+}
+
+/** One commit row from `git log` (log / compare / push preview). */
+export interface WorktreeCommitRow {
+  readonly hash: string
+  readonly shortHash: string
+  readonly author: string
+  readonly email: string
+  /** Author date, ISO 8601 (git `%aI`). */
+  readonly date: string
+  readonly subject: string
+  readonly body?: string
+}
+
+/** `log` outcome — branch/file/range commit list. */
+export interface WorktreeLogValue {
+  readonly path: string
+  readonly commits: readonly WorktreeCommitRow[]
+  readonly truncated?: boolean
+}
+
+/** `showCommit` outcome — one commit's changes + unified diff. */
+export interface WorktreeCommitDetailValue {
+  readonly path: string
+  readonly hash: string
+  readonly branch: string
+  readonly changes: readonly WorktreeChangeRow[]
+  readonly diff: string
+  readonly truncated?: boolean
+}
+
+/** `compare` outcome — our side of `ref..HEAD`. */
+export interface WorktreeCompareValue {
+  readonly path: string
+  readonly branch: string
+  readonly ref: string
+  readonly commits: readonly WorktreeCommitRow[]
+  readonly changes: readonly WorktreeChangeRow[]
+  readonly diff: string
+  readonly truncated?: boolean
+}
+
+/** Deduplicated commit metadata inside a blame result. */
+export interface WorktreeBlameCommit {
+  readonly hash: string
+  readonly author: string
+  readonly date: string
+  readonly subject: string
+}
+
+/** One content line of a blame result; `commit` indexes into `commits`. */
+export interface WorktreeBlameLine {
+  readonly commit: number
+  readonly oldNo: number
+  readonly newNo: number
+  readonly code: string
+}
+
+/** `blame` outcome — per-line annotation for one file. */
+export interface WorktreeBlameValue {
+  readonly path: string
+  readonly file: string
+  readonly commits: readonly WorktreeBlameCommit[]
+  readonly lines: readonly WorktreeBlameLine[]
+  readonly truncated?: boolean
+}
+
+/** One file's selected-hunk patch sent from the browser for partial staging. */
+export interface WorktreeHunkPatch {
+  readonly file: string
+  readonly patch: string
+}
+
+/** `applyPatch` outcome. */
+export interface WorktreeApplyPatchValue {
+  readonly path: string
 }
 
 /** `suggestCommitMessage` outcome. */

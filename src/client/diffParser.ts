@@ -14,6 +14,16 @@ export interface DiffLineRow {
   readonly hunkContext?: string
   /** Character ranges inside `code` that differ from the paired line (intra-line highlight). Filled by markInlinePairs. */
   spans?: readonly InlineSpan[]
+  /** True when git reported "\ No newline at end of file" right after this row; assemblePatch re-emits the marker. */
+  noNewlineAfter?: boolean
+}
+
+/** Row range of one hunk inside `ParsedFileDiff.rows` (banner row inclusive, end exclusive). */
+export interface HunkSpan {
+  /** Index of the `@@` banner row in `rows`. */
+  readonly bannerIdx: number
+  /** Exclusive end index (last row of this hunk + 1). */
+  readonly endIdx: number
 }
 
 export interface ParsedFileDiff {
@@ -22,6 +32,10 @@ export interface ParsedFileDiff {
   readonly del: number
   readonly rows: readonly DiffLineRow[]
   readonly binary: boolean
+  /** Raw header lines before the first `@@` (diff --git / mode / index / rename / --- / +++ …). */
+  readonly headerLines: readonly string[]
+  /** Hunk row ranges in order; feeds assemblePatch hunk-granular selection. */
+  readonly hunks: readonly HunkSpan[]
 }
 
 export interface InlineSpan {
@@ -117,14 +131,18 @@ export function parseStructuredDiff(raw: string): Map<string, ParsedFileDiff> {
   let del = 0
   let binary = false
   let rows: DiffLineRow[] = []
+  let headerLines: string[] = []
+  let hunks: HunkSpan[] = []
+  let hunkStart = -1
   let oldLine = 0
   let newLine = 0
   let inHunk = false
 
   const flush = (): void => {
     if (currentFile !== null) {
+      if (hunkStart >= 0) hunks.push({ bannerIdx: hunkStart, endIdx: rows.length })
       markInlinePairs(rows)
-      result.set(currentFile, { file: currentFile, add, del, rows, binary })
+      result.set(currentFile, { file: currentFile, add, del, rows, binary, headerLines, hunks })
     }
   }
 
@@ -138,19 +156,21 @@ export function parseStructuredDiff(raw: string): Map<string, ParsedFileDiff> {
       del = 0
       binary = false
       rows = []
+      headerLines = []
+      hunks = []
+      hunkStart = -1
       inHunk = false
+      // The 'diff --git' line itself belongs to this file's header.
+      headerLines.push(line)
       continue
     }
     if (currentFile === null) continue
 
-    if (line.startsWith('Binary files ') || line.startsWith('GIT binary patch')) {
-      binary = true
-      continue
-    }
-
     if (line.startsWith('@@ ')) {
       const m = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)$/.exec(line)
       if (m !== null) {
+        if (hunkStart >= 0) hunks.push({ bannerIdx: hunkStart, endIdx: rows.length })
+        hunkStart = rows.length
         oldLine = Number.parseInt(m[1]!, 10)
         newLine = Number.parseInt(m[2]!, 10)
         const endIdx = line.indexOf('@@', 2)
@@ -162,8 +182,16 @@ export function parseStructuredDiff(raw: string): Map<string, ParsedFileDiff> {
       }
     }
 
-    if (!inHunk) continue
-    if (line.startsWith('\\ No newline at end of file')) continue
+    if (line.startsWith('Binary files ') || line.startsWith('GIT binary patch')) binary = true
+    if (!inHunk) {
+      headerLines.push(line)
+      continue
+    }
+    if (line.startsWith('\\ No newline at end of file')) {
+      const last = rows[rows.length - 1]
+      if (last !== undefined && last.kind !== 'hunk') last.noNewlineAfter = true
+      continue
+    }
 
     const prefix = line[0]
     if (prefix === '+') {
@@ -190,4 +218,40 @@ export function changeLetter(change: WorktreeChangeRow): 'A' | 'M' | 'D' | 'R' {
   if (ch === 'D') return 'D'
   if (ch === 'R' || ch === 'C') return 'R'
   return 'M'
+}
+
+/**
+ * Rebuild a valid unified patch from the file header plus the selected hunk
+ * blocks (each block keeps its own context lines). Selection granularity is
+ * the whole hunk; line-level selection is intentionally not supported — it
+ * would require re-counting every `@@` header. For untracked files the
+ * resulting patch may be rejected by `git apply`; callers fall back to a
+ * whole-file commit for those.
+ */
+export function assemblePatch(parsed: ParsedFileDiff, hunkRowIdx: readonly number[]): string {
+  const wanted = new Set(hunkRowIdx)
+  const spans = parsed.hunks.filter(h => wanted.has(h.bannerIdx))
+  if (spans.length === 0) return ''
+  const out: string[] = [...parsed.headerLines]
+  for (const span of spans) {
+    for (let i = span.bannerIdx; i < span.endIdx; i++) {
+      const row = parsed.rows[i]
+      if (row === undefined) continue
+      out.push(row.kind === 'hunk' ? row.code : `${row.sign}${row.code}`)
+      if (row.noNewlineAfter === true) out.push('\\ No newline at end of file')
+    }
+  }
+  return `${out.join('\n')}\n`
+}
+
+/** Case-insensitive substring filter over subject / author / shortHash (client-side log search). */
+export function filterCommits<T extends { subject: string; author: string; shortHash: string }>(
+  commits: readonly T[],
+  query: string,
+): readonly T[] {
+  const q = query.trim().toLowerCase()
+  if (q.length === 0) return commits
+  return commits.filter(
+    c => c.subject.toLowerCase().includes(q) || c.author.toLowerCase().includes(q) || c.shortHash.toLowerCase().includes(q),
+  )
 }

@@ -183,16 +183,21 @@ test('WorktreeManagerService end-to-end: SRC descriptors, multi-repo overview, l
     const methods = remoteMethods(svc)
     const exportedNames = methods.map(m => m.exportName ?? m.method).sort()
     assert.deepEqual(exportedNames, [
+      'applyPatch',
       'archivedMeta',
+      'blame',
       'branches',
       'commit',
+      'compare',
       'create',
       'diff',
       'ensureWorkspace',
+      'log',
       'overview',
       'push',
       'remove',
       'setPinned',
+      'showCommit',
       'status',
       'suggestCommitMessage',
     ])

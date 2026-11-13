@@ -2037,6 +2037,196 @@ const CSS = `
     min-height: 0;
   }
 }
+
+/* ─ P0 git review: tabs / hunk controls / log / blame / compare / push overlay ─ */
+.owt-gp-root {
+  position: relative;
+}
+.owt-gp-card-head-btn {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.owt-gp-head-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+}
+.owt-gp-headbtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 20px;
+  padding: 0 7px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11px;
+  cursor: pointer;
+  flex: none;
+}
+.owt-gp-headbtn:hover:not(:disabled) {
+  background: var(--owt-gp-hover);
+  color: var(--dsw-alias-label-primary);
+}
+.owt-gp-headbtn[data-danger='true']:hover:not(:disabled) {
+  color: var(--owt-gp-red);
+  background: color-mix(in srgb, var(--owt-gp-red) 8%, transparent);
+}
+.owt-gp-headbtn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.owt-gp-hunk-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.owt-gp-hunk-check {
+  width: 12px;
+  height: 12px;
+  margin: 0;
+  accent-color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+  flex: none;
+}
+.owt-gp-commitlist {
+  display: flex;
+  flex-direction: column;
+  padding: 8px 0 40px;
+}
+.owt-gp-commit-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 5px 16px;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+button.owt-gp-commit-row:hover {
+  background: var(--owt-gp-hover);
+}
+.owt-gp-commit-hash {
+  font-family: var(--owt-font-code);
+  font-size: 11.5px;
+  color: var(--owt-gp-amber);
+  flex: none;
+}
+.owt-gp-commit-author,
+.owt-gp-commit-date {
+  flex: none;
+  font-size: 11.5px;
+  color: var(--dsw-alias-label-tertiary, var(--dsw-alias-label-secondary));
+}
+.owt-gp-commit-subj {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+.owt-gp-detail-bar {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px;
+  background: var(--dsw-alias-bg-base);
+  border-bottom: 1px solid var(--owt-gp-hairline);
+}
+.owt-gp-detail-meta {
+  font-size: 11.5px;
+  color: var(--dsw-alias-label-secondary);
+}
+.owt-gp-blame-meta {
+  padding: 0 10px 0 16px;
+  font-family: var(--owt-font-code);
+  font-size: 10.5px;
+  color: var(--dsw-alias-label-tertiary, var(--dsw-alias-label-secondary));
+  white-space: nowrap;
+  max-width: 340px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.owt-gp-select,
+.owt-gp-filter {
+  min-height: 26px;
+  padding: 2px 8px;
+  border: 1px solid var(--owt-gp-hairline);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font-size: 11.5px;
+}
+.owt-gp-filter {
+  width: 180px;
+}
+.owt-gp-hint {
+  font-size: 11px;
+  color: var(--owt-gp-amber);
+  line-height: 1.4;
+}
+.owt-gp-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--dsw-alias-label-primary) 18%, transparent);
+}
+.owt-gp-overlay-box {
+  width: min(520px, 92%);
+  max-height: 80%;
+  overflow: auto;
+  background: var(--dsw-alias-bg-base);
+  border: 1px solid var(--owt-gp-hairline);
+  border-radius: 10px;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.18);
+}
+.owt-gp-overlay-title {
+  font-weight: 600;
+  font-size: 13px;
+}
+.owt-gp-overlay-list {
+  max-height: 220px;
+  overflow: auto;
+  border: 1px solid var(--owt-gp-hairline);
+  border-radius: 7px;
+}
+.owt-gp-overlay-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+}
+.owt-gp-push-confirm {
+  width: auto;
+  min-width: 120px;
+}
 `
 
 export function injectStyles(): void {

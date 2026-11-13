@@ -216,3 +216,11 @@ export function IconCheck({ size = 13 }: { size?: number }): ReactElement {
     </svg>
   )
 }
+
+export function IconBack({ size = 12 }: { size?: number }): ReactElement {
+  return (
+    <svg viewBox="0 0 16 16" width={size} height={size} fill="none" stroke="currentColor" strokeWidth={1.45} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M9.75 3.5 5 8l4.75 4.5M5 8h8.5" />
+    </svg>
+  )
+}

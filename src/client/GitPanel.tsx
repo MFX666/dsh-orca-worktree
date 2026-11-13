@@ -1,21 +1,32 @@
 /**
  * Git Source-Control & Diff Review Workbench mounted in the conversation view
- * tab strip (`conversation.view`), next to 对话 / 轨迹 / AOCI.
+ * tab strip ('conversation.view'), next to 对话 / 轨迹 / AOCI.
  *
  * Layout: IDE two-pane split workbench
  * - Left pane (320px): branch & upstream bar, commit composer with inline AI
  *   writer, and directory-grouped file tree with per-file staging checkboxes.
- * - Right pane (flex 1): GitHub/Cursor-grade structured unified diff viewer
- *   with sticky file headers, hunk banners, dual old/new line-number gutters,
- *   and instant single-file / all-files mode switching.
+ * - Right pane (flex 1): three tabs — 变更 (structured unified diff; per-hunk
+ *   commit checkboxes, stage/discard hunk buttons, per-file history/blame),
+ *   日志 (commit log with client-side filter + commit detail), 比较 (diff
+ *   against a local base branch). Push goes through a confirm overlay.
  * @module dsh-worktree-plugin/client/GitPanel
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
-import type { WorktreeChangeRow, WorktreeDiffValue, WorktreeStatusValue } from '../protocol.ts'
+import type {
+  WorktreeBlameValue,
+  WorktreeChangeRow,
+  WorktreeCommitDetailValue,
+  WorktreeCommitRow,
+  WorktreeCompareValue,
+  WorktreeDiffValue,
+  WorktreeHunkPatch,
+  WorktreeStatusValue,
+} from '../protocol.ts'
 import type { WorktreeApi } from './api.ts'
-import { changeLetter, parseStructuredDiff, type DiffLineRow, type ParsedFileDiff } from './diffParser.ts'
+import { assemblePatch, changeLetter, filterCommits, parseStructuredDiff, type DiffLineRow, type ParsedFileDiff } from './diffParser.ts'
 import type { ReactNode } from 'react'
 import {
+  IconBack,
   IconCheck,
   IconChevron,
   IconFile,
@@ -31,6 +42,9 @@ type Translate = (key: string, params?: Record<string, string | number>) => stri
 
 const MAX_FILE_RENDER_LINES = 2500
 const MAX_ALL_RENDER_LINES = 4500
+const LOG_LIMIT = 200
+/** Newline character without a backslash escape (keeps this file escape-free). */
+const LF = String.fromCharCode(10)
 
 interface CommitGroup {
   readonly dir: string
@@ -69,19 +83,26 @@ function buildGroups(
     .map(([dir, files]) => ({ dir, files }))
 }
 
+/** 'YYYY-MM-DD' slice of an ISO commit date. */
+function fmtDate(iso: string): string {
+  return iso.length >= 10 ? iso.slice(0, 10) : iso
+}
+
 /** Session summary slice needed to resolve a conversation's checkout. */
 export interface SessionSummarySlice {
   readonly ids: readonly string[]
   readonly byId: Readonly<Record<string, { readonly cwd?: string } | undefined>>
 }
 
-/** Injected face for the `conversation.view` Git tab body. */
+/** Injected face for the 'conversation.view' Git tab body. */
 export interface CommitPanelProps {
   api: WorktreeApi
   t: Translate
   sessionId: string
   useSessions: <R>(selector: (state: SessionSummarySlice) => R) => R
 }
+
+type RightTab = 'changes' | 'log' | 'compare'
 
 export function CommitPanel(props: CommitPanelProps): ReactElement {
   const { api, t, sessionId, useSessions } = props
@@ -108,6 +129,29 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
   const [extraParsed, setExtraParsed] = useState<ReadonlyMap<string, ParsedFileDiff>>(() => new Map())
   const [loadingFile, setLoadingFile] = useState<string | null>(null)
 
+  // Right-pane tabs + review features (P0 git review).
+  const [tab, setTab] = useState<RightTab>('changes')
+  /** file -> selected hunk banner row indexes (rows index into ParsedFileDiff.rows). */
+  const [hunkSel, setHunkSel] = useState<ReadonlyMap<string, ReadonlySet<number>>>(() => new Map())
+  const [history, setHistory] = useState<{ file: string; commits: readonly WorktreeCommitRow[] } | null>(null)
+  const [blame, setBlame] = useState<WorktreeBlameValue | null>(null)
+  const [blameLoading, setBlameLoading] = useState(false)
+  const [logCommits, setLogCommits] = useState<readonly WorktreeCommitRow[] | null>(null)
+  const [logTruncated, setLogTruncated] = useState(false)
+  const [logRange, setLogRange] = useState<'all' | 'ahead'>('all')
+  const [logQuery, setLogQuery] = useState('')
+  const [logLoading, setLogLoading] = useState(false)
+  const [detail, setDetail] = useState<WorktreeCommitDetailValue | null>(null)
+  const [detailLoading, setDetailLoading] = useState(false)
+  const [repoRoot, setRepoRoot] = useState<string | null>(null)
+  const [localBranches, setLocalBranches] = useState<readonly string[]>([])
+  const [compareRef, setCompareRef] = useState<string | null>(null)
+  const [compareData, setCompareData] = useState<WorktreeCompareValue | null>(null)
+  const [compareLoading, setCompareLoading] = useState(false)
+  const [pushOpen, setPushOpen] = useState(false)
+  const [pushAhead, setPushAhead] = useState<readonly WorktreeCommitRow[] | null>(null)
+  const [forceLease, setForceLease] = useState(false)
+
   const diffScrollRef = useRef<HTMLDivElement | null>(null)
   const rootRef = useRef<HTMLDivElement | null>(null)
   // Host tab wrappers are not guaranteed to constrain height; pin the workbench
@@ -118,7 +162,7 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
     if (el === null) return
     const update = () => {
       const top = el.getBoundingClientRect().top
-      setRootHeight(top > 1 ? `calc(100dvh - ${Math.round(top)}px)` : '100%')
+      setRootHeight(top > 1 ? 'calc(100dvh - ' + Math.round(top) + 'px)' : '100%')
     }
     update()
     const observer = new ResizeObserver(update)
@@ -134,6 +178,12 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
   const cardRefs = useRef<Map<string, HTMLElement>>(new Map())
   const attemptedFilesRef = useRef<Set<string>>(new Set())
   const loadCtrlRef = useRef<AbortController | null>(null)
+
+  // Branch/upstream/ahead/behind derived BEFORE the hooks that read them.
+  const branch = diff?.branch || status?.branch || 'HEAD'
+  const upstream = status?.upstream
+  const ahead = status?.ahead ?? 0
+  const behind = status?.behind ?? 0
 
   const loadWorkspaceDiff = useCallback(
     async (targetPath: string, isInitial: boolean) => {
@@ -153,6 +203,7 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
         if (signal.aborted) return
         attemptedFilesRef.current.clear()
         setExtraParsed(new Map())
+        setHunkSel(new Map())
         setDiff(nextDiff)
         setStatus(nextStatus)
         const allPaths = nextDiff.changes.map(c => c.file)
@@ -187,6 +238,16 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
     setBanner(undefined)
     setCollapsedDirs(new Set())
     setCollapsedCards(new Set())
+    setHunkSel(new Map())
+    setHistory(null)
+    setBlame(null)
+    setDetail(null)
+    setLogCommits(null)
+    setCompareData(null)
+    setCompareRef(null)
+    setRepoRoot(null)
+    setLocalBranches([])
+    setPushOpen(false)
     void loadWorkspaceDiff(path, true)
     return () => loadCtrlRef.current?.abort()
   }, [loadWorkspaceDiff, path])
@@ -255,6 +316,29 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
     return { add, del }
   }, [groups])
 
+  // Files committed via selected hunks only (whole-file checkbox off, hunks checked, parsable, tracked).
+  const hunkReadyFiles = useMemo(() => {
+    if (diff === null) return []
+    return diff.changes.filter(
+      c => !selectedFiles.has(c.file) && !c.untracked && (hunkSel.get(c.file)?.size ?? 0) > 0 && parsedMap.has(c.file),
+    )
+  }, [diff, hunkSel, parsedMap, selectedFiles])
+  // Untracked files with hunk checks degenerate to whole-file commits at submit time.
+  const untrackedHunkCount = useMemo(() => {
+    if (diff === null) return 0
+    return diff.changes.filter(
+      c => c.untracked && !selectedFiles.has(c.file) && (hunkSel.get(c.file)?.size ?? 0) > 0,
+    ).length
+  }, [diff, hunkSel, selectedFiles])
+  const hunkTouched = hunkReadyFiles.length > 0 || untrackedHunkCount > 0 || [...hunkSel.values()].some(s => s.size > 0)
+
+  const switchTab = useCallback((next: RightTab) => {
+    setTab(next)
+    setDetail(null)
+    setBlame(null)
+    setHistory(null)
+  }, [])
+
   const toggleSelectAll = useCallback(() => {
     if (diff === null) return
     const all = diff.changes.map(c => c.file)
@@ -266,6 +350,18 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
       const next = new Set(prev)
       if (next.has(file)) next.delete(file)
       else next.add(file)
+      return next
+    })
+  }, [])
+
+  const toggleHunk = useCallback((file: string, idx: number) => {
+    setHunkSel(prev => {
+      const next = new Map(prev)
+      const set = new Set(next.get(file) ?? [])
+      if (set.has(idx)) set.delete(idx)
+      else set.add(idx)
+      if (set.size === 0) next.delete(file)
+      else next.set(file, set)
       return next
     })
   }, [])
@@ -291,6 +387,14 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
   const handleSelectFileRow = useCallback(
     (file: string) => {
       setActiveFile(file)
+      if (tab !== 'changes') {
+        // Selecting a file in the tree always brings the diff back to the front.
+        setTab('changes')
+        setDetail(null)
+        setBlame(null)
+        setHistory(null)
+        return
+      }
       if (viewMode === 'all') {
         const el = cardRefs.current.get(file)
         el?.scrollIntoView({
@@ -301,7 +405,7 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
         diffScrollRef.current.scrollTop = 0
       }
     },
-    [viewMode],
+    [tab, viewMode],
   )
 
   const handleSuggest = useCallback(async () => {
@@ -318,30 +422,233 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
     }
   }, [api, busy, path, suggesting])
 
-  const handlePush = useCallback(async () => {
-    if (path === undefined || pushing || busy || loading || refreshing) return
-    setPushing(true)
-    setError(undefined)
-    try {
-      const pushed = await api.push(path)
-      setBanner(t('notice.pushed', { branch: pushed.branch, upstream: pushed.upstream }))
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setPushing(false)
-      // Reload so ahead/behind and the upstream pill reflect the push.
-      void loadWorkspaceDiff(path, false)
+  const handlePush = useCallback(
+    async (withLease = false) => {
+      if (path === undefined || pushing || busy || loading || refreshing) return
+      setPushing(true)
+      setError(undefined)
+      try {
+        const pushed = await api.push(path, withLease ? { forceWithLease: true } : undefined)
+        setPushOpen(false)
+        setBanner(t('notice.pushed', { branch: pushed.branch, upstream: pushed.upstream }))
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err))
+      } finally {
+        setPushing(false)
+        // Reload so ahead/behind and the upstream pill reflect the push.
+        void loadWorkspaceDiff(path, false)
+      }
+    },
+    [api, busy, loadWorkspaceDiff, loading, path, pushing, refreshing, t],
+  )
+
+  // Push button: without an upstream keep the legacy direct push; with one, open the confirm overlay.
+  const openPushOverlay = useCallback(async () => {
+    if (path === undefined) return
+    if (upstream === undefined) {
+      await handlePush()
+      return
     }
-  }, [api, busy, loadWorkspaceDiff, loading, path, pushing, refreshing, t])
+    setForceLease(false)
+    setPushAhead(null)
+    setPushOpen(true)
+    try {
+      const v = await api.log(path, { refRange: upstream + '..HEAD' })
+      setPushAhead(v.commits)
+    } catch {
+      setPushAhead([])
+    }
+  }, [api, handlePush, path, upstream])
+
+  const errText = (err: unknown): string => (err instanceof Error ? err.message : String(err))
+
+  const openHistory = useCallback(
+    async (file: string) => {
+      if (path === undefined) return
+      setBlame(null)
+      setDetail(null)
+      setTab('changes')
+      setHistory({ file, commits: [] })
+      try {
+        const v = await api.log(path, { file, limit: LOG_LIMIT })
+        setHistory({ file, commits: v.commits })
+      } catch (err) {
+        setHistory(null)
+        setError(errText(err))
+      }
+    },
+    [api, path],
+  )
+
+  const openBlame = useCallback(
+    async (file: string) => {
+      if (path === undefined) return
+      setHistory(null)
+      setDetail(null)
+      setTab('changes')
+      setBlame(null)
+      setBlameLoading(true)
+      try {
+        setBlame(await api.blame(path, file))
+      } catch (err) {
+        setError(errText(err))
+      } finally {
+        setBlameLoading(false)
+      }
+    },
+    [api, path],
+  )
+
+  const openCommit = useCallback(
+    async (hash: string) => {
+      if (path === undefined) return
+      setDetailLoading(true)
+      setError(undefined)
+      try {
+        setDetail(await api.showCommit(path, hash))
+      } catch (err) {
+        setError(errText(err))
+      } finally {
+        setDetailLoading(false)
+      }
+    },
+    [path],
+  )
+
+  // Log tab: full branch history by default; the 'unpushed' preset needs a known upstream.
+  useEffect(() => {
+    if (path === undefined || tab !== 'log' || detail !== null) return
+    const controller = new AbortController()
+    setLogLoading(true)
+    api
+      .log(
+        path,
+        logRange === 'ahead' && upstream !== undefined ? { refRange: upstream + '..HEAD', limit: LOG_LIMIT } : { limit: LOG_LIMIT },
+        controller.signal,
+      )
+      .then(v => {
+        if (controller.signal.aborted) return
+        setLogCommits(v.commits)
+        setLogTruncated(v.truncated === true)
+      })
+      .catch(err => {
+        if (!controller.signal.aborted) setError(errText(err))
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLogLoading(false)
+      })
+    return () => controller.abort()
+  }, [api, detail, logRange, path, tab, upstream])
+
+  // Repository root + local branch list for the compare tab (longest-prefix match, same as index.ts menus).
+  useEffect(() => {
+    if (tab !== 'compare' || path === undefined || repoRoot !== null) return
+    let cancelled = false
+    const resolve = async (): Promise<void> => {
+      let root: string | null = null
+      try {
+        const ov = await api.overview(false)
+        const norm = path.length > 1 ? path.replace(/[/]+$/, '') : path
+        for (const repo of ov.repos) {
+          for (const row of repo.rows) {
+            const rowNorm = row.path.length > 1 ? row.path.replace(/[/]+$/, '') : row.path
+            if ((norm === rowNorm || norm.startsWith(rowNorm + '/')) && (root === null || rowNorm.length > root.length)) {
+              root = repo.repositoryRoot
+            }
+          }
+        }
+      } catch {
+        return
+      }
+      if (root === null || cancelled) return
+      setRepoRoot(root)
+      try {
+        const b = await api.branches(root)
+        if (!cancelled) setLocalBranches(b.localBranches.filter(x => x !== branch))
+      } catch {
+        if (!cancelled) setLocalBranches([])
+      }
+    }
+    void resolve()
+    return () => {
+      cancelled = true
+    }
+  }, [api, branch, path, repoRoot, tab])
+
+  const loadCompare = useCallback(
+    async (ref: string) => {
+      if (path === undefined) return
+      setCompareRef(ref)
+      setDetail(null)
+      setCompareLoading(true)
+      setError(undefined)
+      try {
+        setCompareData(await api.compare(path, ref))
+      } catch (err) {
+        setCompareData(null)
+        setError(errText(err))
+      } finally {
+        setCompareLoading(false)
+      }
+    },
+    [path],
+  )
+
+  const applyHunk = useCallback(
+    async (file: string, idx: number, opts: { cached?: boolean; reverse?: boolean }) => {
+      if (path === undefined) return
+      const parsed = parsedMap.get(file)
+      if (parsed === undefined) return
+      const patch = assemblePatch(parsed, [idx])
+      if (patch === '') return
+      setError(undefined)
+      try {
+        await api.applyPatch(path, patch, opts)
+        setBanner(t(opts.cached === true ? 'gp.hunk.staged' : 'gp.hunk.discarded'))
+        await loadWorkspaceDiff(path, false)
+      } catch (err) {
+        setError(errText(err))
+      }
+    },
+    [api, loadWorkspaceDiff, parsedMap, path, t],
+  )
 
   const submit = useCallback(async () => {
     if (path === undefined || busy || suggesting || diff === null) return
-    if (msg.trim().length === 0 || selectedFiles.size === 0) return
+    if (msg.trim().length === 0) return
+    // Whole-file selection wins over its hunk selection (contract); hunk patches
+    // apply only to files whose whole checkbox is off.
+    const wholeFiles = diff.changes.map(c => c.file).filter(f => selectedFiles.has(f))
+    const hunkPatches: WorktreeHunkPatch[] = []
+    const extraWhole: string[] = []
+    for (const change of hunkReadyFiles) {
+      const parsed = parsedMap.get(change.file)
+      const idxs = [...(hunkSel.get(change.file) ?? [])]
+      if (parsed === undefined) {
+        extraWhole.push(change.file)
+        continue
+      }
+      const patch = assemblePatch(parsed, idxs)
+      // shortcut: unparsable (e.g. binary-ish) diff degenerates to a whole-file commit
+      if (patch === '') extraWhole.push(change.file)
+      else hunkPatches.push({ file: change.file, patch })
+    }
+    // Untracked files cannot go through hunk patches (git apply may reject them) — commit them whole.
+    for (const change of diff.changes) {
+      if (!change.untracked || selectedFiles.has(change.file)) continue
+      if ((hunkSel.get(change.file)?.size ?? 0) > 0) extraWhole.push(change.file)
+    }
+    if (wholeFiles.length === 0 && extraWhole.length === 0 && hunkPatches.length === 0) return
     setBusy(true)
     setError(undefined)
     try {
-      const filesToCommit = diff.changes.map(c => c.file).filter(f => selectedFiles.has(f))
-      const committed = await api.commit(path, msg, filesToCommit)
+      const filesToCommit = [...wholeFiles, ...extraWhole]
+      const committed = await api.commit(
+        path,
+        msg,
+        filesToCommit,
+        hunkPatches.length > 0 ? { hunks: hunkPatches } : undefined,
+      )
       setMsg('')
       setBanner(t('notice.committed', { commit: committed.commit, summary: committed.summary }))
       window.dispatchEvent(new CustomEvent('dsh-worktree:refresh'))
@@ -351,7 +658,7 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
     } finally {
       setBusy(false)
     }
-  }, [api, busy, diff, loadWorkspaceDiff, msg, path, selectedFiles, suggesting, t])
+  }, [api, busy, diff, hunkReadyFiles, hunkSel, loadWorkspaceDiff, msg, parsedMap, path, selectedFiles, suggesting, t])
 
   const renderedChanges = useMemo(() => {
     if (diff === null || diff.changes.length === 0) return []
@@ -359,6 +666,20 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
     const found = diff.changes.find(c => c.file === activeFile) ?? diff.changes[0]
     return found !== undefined ? [found] : []
   }, [activeFile, diff, viewMode])
+
+  // Pre-rendered parse maps for the detail (showCommit) and compare bodies.
+  const detailParsedMap = useMemo(
+    () => (detail !== null ? parseStructuredDiff(detail.diff) : new Map<string, ParsedFileDiff>()),
+    [detail],
+  )
+  const compareParsedMap = useMemo(
+    () => (compareData !== null ? parseStructuredDiff(compareData.diff) : new Map<string, ParsedFileDiff>()),
+    [compareData],
+  )
+  const shownLog = useMemo(
+    () => (logCommits === null ? null : filterCommits(logCommits, logQuery)),
+    [logCommits, logQuery],
+  )
 
   if (path === undefined) {
     return (
@@ -371,15 +692,12 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
     )
   }
 
-  const branch = diff?.branch || status?.branch || 'HEAD'
-  const upstream = status?.upstream
-  const ahead = status?.ahead ?? 0
-  const behind = status?.behind ?? 0
   const totalChanges = diff?.changes.length ?? 0
   const hasChanges = totalChanges > 0
   const allChecked = hasChanges && selectedFiles.size === totalChanges
   const someChecked = selectedFiles.size > 0 && !allChecked
-  const canCommit = !busy && !suggesting && selectedFiles.size > 0 && msg.trim().length > 0
+  const commitCount = selectedFiles.size + hunkReadyFiles.length + untrackedHunkCount
+  const canCommit = !busy && !suggesting && msg.trim().length > 0 && commitCount > 0
 
   const renderCode = (row: DiffLineRow): ReactNode => {
     const code = row.code
@@ -388,9 +706,9 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
     const nodes: ReactNode[] = []
     let pos = 0
     spans.forEach((span, idx) => {
-      if (span.start > pos) nodes.push(<span key={`p${idx}`}>{code.slice(pos, span.start)}</span>)
+      if (span.start > pos) nodes.push(<span key={'p' + idx}>{code.slice(pos, span.start)}</span>)
       nodes.push(
-        <span key={`c${idx}`} className="owt-gp-inline-chg">
+        <span key={'c' + idx} className="owt-gp-inline-chg">
           {code.slice(span.start, span.end)}
         </span>,
       )
@@ -400,17 +718,25 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
     return nodes
   }
 
-  const renderDiffCard = (change: WorktreeChangeRow, lineLimit: number): ReactElement => {
-    const parsed = parsedMap.get(change.file)
+  const renderDiffCard = (
+    change: WorktreeChangeRow,
+    lineLimit: number,
+    map: ReadonlyMap<string, ParsedFileDiff>,
+    readonly: boolean,
+  ): ReactElement => {
+    const parsed = map.get(change.file)
     const letter = changeLetter(change)
     const sep = change.file.lastIndexOf('/')
-    const dirPrefix = sep > 0 ? `${change.file.slice(0, sep + 1)}` : ''
+    const dirPrefix = sep > 0 ? change.file.slice(0, sep + 1) : ''
     const baseName = sep >= 0 ? change.file.slice(sep + 1) : change.file
     const add = change.add ?? parsed?.add ?? 0
     const del = change.del ?? parsed?.del ?? 0
     const rows = parsed?.rows ?? []
     const isCollapsed = collapsedCards.has(change.file)
     const slicedRows = rows.length > lineLimit ? rows.slice(0, lineLimit) : rows
+    const hunkChecks = hunkSel.get(change.file)
+    // Hunk checkboxes/stage/discard only make sense for tracked worktree changes.
+    const hunkControls = !readonly && !change.untracked
 
     return (
       <section
@@ -421,30 +747,52 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
         }}
         className="owt-gp-card"
       >
-        <button
-          type="button"
-          className="owt-gp-card-head"
-          aria-expanded={!isCollapsed}
-          onClick={() => toggleCard(change.file)}
-        >
-          <span className="owt-gp-chevron">
-            <IconChevron open={!isCollapsed} size={12} />
-          </span>
-          <span className="owt-gp-badge" data-kind={letter}>
-            {letter}
-          </span>
-          <span className="owt-gp-card-path" title={change.oldFile !== undefined ? `${change.oldFile} → ${change.file}` : change.file}>
-            {dirPrefix !== '' && <span className="owt-gp-card-dir">{dirPrefix}</span>}
-            {change.oldFile !== undefined && (
-              <span className="owt-gp-oldname">{change.oldFile.slice(change.oldFile.lastIndexOf('/') + 1)} → </span>
-            )}
-            <span className="owt-gp-card-name">{baseName}</span>
-          </span>
-          <span className="owt-gp-card-stats">
-            {add > 0 && <span className="owt-gp-add">+{add}</span>}
-            {del > 0 && <span className="owt-gp-del">−{del}</span>}
-          </span>
-        </button>
+        <div className="owt-gp-card-head">
+          <button
+            type="button"
+            className="owt-gp-card-head-btn"
+            aria-expanded={!isCollapsed}
+            onClick={() => toggleCard(change.file)}
+          >
+            <span className="owt-gp-chevron">
+              <IconChevron open={!isCollapsed} size={12} />
+            </span>
+            <span className="owt-gp-badge" data-kind={letter}>
+              {letter}
+            </span>
+            <span className="owt-gp-card-path" title={change.oldFile !== undefined ? change.oldFile + ' → ' + change.file : change.file}>
+              {dirPrefix !== '' && <span className="owt-gp-card-dir">{dirPrefix}</span>}
+              {change.oldFile !== undefined && (
+                <span className="owt-gp-oldname">{change.oldFile.slice(change.oldFile.lastIndexOf('/') + 1)} → </span>
+              )}
+              <span className="owt-gp-card-name">{baseName}</span>
+            </span>
+            <span className="owt-gp-card-stats">
+              {add > 0 && <span className="owt-gp-add">+{add}</span>}
+              {del > 0 && <span className="owt-gp-del">−{del}</span>}
+            </span>
+          </button>
+          {!readonly && (
+            <span className="owt-gp-head-actions">
+              <button
+                type="button"
+                className="owt-gp-headbtn"
+                title={t('gp.history')}
+                onClick={() => { void openHistory(change.file) }}
+              >
+                {t('gp.history')}
+              </button>
+              <button
+                type="button"
+                className="owt-gp-headbtn"
+                title={t('gp.blame')}
+                onClick={() => { void openBlame(change.file) }}
+              >
+                {t('gp.blame')}
+              </button>
+            </span>
+          )}
+        </div>
 
         {!isCollapsed && (
           <div className="owt-gp-card-body">
@@ -460,19 +808,60 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
                       if (row.kind === 'hunk') {
                         // Orca-style collapsed-context strip; header text kept for tooltip/AT only.
                         const hunkLabel = row.hunkContext !== undefined && row.hunkContext !== ''
-                          ? `${row.hunkHeader} ${row.hunkContext}`
+                          ? row.hunkHeader + ' ' + row.hunkContext
                           : row.hunkHeader
+                        const checked = hunkChecks?.has(idx) === true
                         return (
                           <tr key={idx} className="owt-gp-tr-hunk" title={hunkLabel}>
                             <td className="owt-gp-td-hunk" colSpan={3}>
-                              <span className="owt-gp-hunk-strip" aria-hidden="true" />
-                              <span className="owt-gp-visually-hidden">{hunkLabel}</span>
+                              <div className="owt-gp-hunk-bar">
+                                {hunkControls && (
+                                  <input
+                                    type="checkbox"
+                                    className="owt-gp-hunk-check"
+                                    checked={checked}
+                                    disabled={busy}
+                                    aria-label={t('gp.hunk.select')}
+                                    title={t('gp.hunk.select')}
+                                    onChange={() => toggleHunk(change.file, idx)}
+                                  />
+                                )}
+                                <span className="owt-gp-hunk-strip" aria-hidden="true" />
+                                <span className="owt-gp-visually-hidden">{hunkLabel}</span>
+                                {hunkControls && (
+                                  <span className="owt-gp-head-actions">
+                                    <button
+                                      type="button"
+                                      className="owt-gp-headbtn"
+                                      disabled={busy}
+                                      title={t('gp.hunk.stageTitle')}
+                                      onClick={() => { void applyHunk(change.file, idx, { cached: true }) }}
+                                    >
+                                      {t('gp.hunk.stage')}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="owt-gp-headbtn"
+                                      data-danger="true"
+                                      disabled={busy}
+                                      title={t('gp.hunk.discardTitle')}
+                                      onClick={() => {
+                                        if (window.confirm(t('gp.hunk.discardConfirm'))) {
+                                          void applyHunk(change.file, idx, { reverse: true })
+                                        }
+                                      }}
+                                    >
+                                      {t('gp.hunk.discard')}
+                                    </button>
+                                  </span>
+                                )}
+                              </div>
                             </td>
                           </tr>
                         )
                       }
                       return (
-                        <tr key={idx} className={`owt-gp-tr owt-gp-tr--${row.kind}`}>
+                        <tr key={idx} className={'owt-gp-tr owt-gp-tr--' + row.kind}>
                           <td className="owt-gp-td-num">{row.newNo ?? row.oldNo ?? ''}</td>
                           <td className="owt-gp-td-sign">{row.sign}</td>
                           <td className="owt-gp-td-code">{renderCode(row)}</td>
@@ -493,6 +882,119 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
       </section>
     )
   }
+
+  /** Shared commit-list renderer for the log tab, per-file history and compare. */
+  const renderCommitList = (
+    commits: readonly WorktreeCommitRow[],
+    onPick: (hash: string) => void,
+    truncatedNote?: ReactNode,
+  ): ReactElement => (
+    <div className="owt-gp-commitlist">
+      {commits.map(c => (
+        <button key={c.hash} type="button" className="owt-gp-commit-row" onClick={() => onPick(c.hash)}>
+          <span className="owt-gp-commit-hash" title={c.hash}>{c.shortHash}</span>
+          <span className="owt-gp-commit-author">{c.author}</span>
+          <span className="owt-gp-commit-date">{fmtDate(c.date)}</span>
+          <span className="owt-gp-commit-subj" title={c.body !== undefined && c.body !== '' ? c.subject + LF + c.body : c.subject}>
+            {c.subject}
+          </span>
+        </button>
+      ))}
+      {truncatedNote}
+    </div>
+  )
+
+  /** Commit detail body (showCommit): back bar + diff cards rendered readonly. */
+  const renderDetail = (): ReactElement => (
+    <div className="owt-gp-cards">
+      <div className="owt-gp-detail-bar">
+        <button type="button" className="owt-gp-headbtn" onClick={() => setDetail(null)}>
+          <IconBack size={12} />
+          <span>{t('gp.detail.back')}</span>
+        </button>
+        <span className="owt-gp-commit-hash" title={detail?.hash ?? ''}>{detail?.hash.slice(0, 10)}</span>
+        <span className="owt-gp-detail-meta">
+          {detail?.branch} · {t('gp.detail.files', { count: detail?.changes.length ?? 0 })}
+        </span>
+        {detail?.truncated === true && (
+          <span className="owt-gp-detail-meta">{t('gp.detail.truncated')}</span>
+        )}
+        {detailLoading && <span className="owt-gp-detail-meta">{t('dialog.commit.loading')}</span>}
+      </div>
+      {detail !== null && detail.changes.length === 0 && (
+        <div className="owt-gp-card-empty">{t('dialog.commit.noDiffText')}</div>
+      )}
+      {detail !== null &&
+        detail.changes.map(change => renderDiffCard(change, MAX_FILE_RENDER_LINES, detailParsedMap, true))}
+    </div>
+  )
+
+  /** Blame body: per-line gutter (hash author date subject) + file content. */
+  const renderBlame = (): ReactElement => {
+    if (blame === null) {
+      return (
+        <div className="owt-gp-empty-full">
+          <div className="owt-gp-empty-sub">{t('dialog.commit.loading')}</div>
+        </div>
+      )
+    }
+    return (
+      <div className="owt-gp-cards">
+        <div className="owt-gp-detail-bar">
+          <button type="button" className="owt-gp-headbtn" onClick={() => setBlame(null)}>
+            <IconBack size={12} />
+            <span>{t('gp.detail.back')}</span>
+          </button>
+          <span className="owt-gp-crumb-text" title={blame.file}>{blame.file}</span>
+        </div>
+        <table className="owt-gp-table" aria-label={blame.file}>
+          <tbody>
+            {blame.lines.map((ln, i) => {
+              const bc = blame.commits[ln.commit]
+              const prev = i > 0 ? blame.lines[i - 1] : undefined
+              const showMeta = prev === undefined || prev.commit !== ln.commit
+              const metaText = bc !== undefined
+                ? bc.hash.slice(0, 7) + ' ' + bc.author + ' ' + fmtDate(bc.date) + ' ' + bc.subject
+                : ''
+              return (
+                <tr
+                  key={i}
+                  className="owt-gp-tr owt-gp-tr--ctx"
+                  title={metaText !== '' ? t('gp.blame.lineTitle', { meta: metaText }) : undefined}
+                >
+                  <td className="owt-gp-blame-meta">{showMeta ? metaText : ''}</td>
+                  <td className="owt-gp-td-num">{ln.newNo}</td>
+                  <td className="owt-gp-td-code">{ln.code.length > 0 ? ln.code : ' '}</td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+        {blame.truncated === true && (
+          <div className="owt-gp-truncated">{t('dialog.commit.truncated', { count: blame.lines.length })}</div>
+        )}
+      </div>
+    )
+  }
+
+  /** Per-file history list shown inside the changes tab. */
+  const renderHistory = (): ReactElement => (
+    <div className="owt-gp-commitlist">
+      <div className="owt-gp-detail-bar">
+        <button type="button" className="owt-gp-headbtn" onClick={() => setHistory(null)}>
+          <IconBack size={12} />
+          <span>{t('gp.detail.back')}</span>
+        </button>
+        <span className="owt-gp-crumb-text" title={history?.file ?? ''}>{history?.file}</span>
+        <span className="owt-gp-detail-meta">{t('gp.history')}</span>
+      </div>
+      {(history?.commits.length ?? 0) === 0 ? (
+        <div className="owt-gp-side-hint">{t('gp.log.empty')}</div>
+      ) : (
+        renderCommitList(history?.commits ?? [], hash => { void openCommit(hash) })
+      )}
+    </div>
+  )
 
   return (
     <div className="owt-gp-root" ref={rootRef} style={{ height: rootHeight }}>
@@ -517,7 +1019,7 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
             title={upstream === undefined ? t('dialog.commit.pushNoUpstream') : t('dialog.commit.push', { count: ahead })}
             aria-label={upstream === undefined ? t('dialog.commit.pushNoUpstream') : t('dialog.commit.push', { count: ahead })}
             disabled={loading || refreshing || busy || pushing || (upstream !== undefined && ahead === 0)}
-            onClick={() => { void handlePush() }}
+            onClick={() => { void openPushOverlay() }}
           >
             <IconPush size={13.5} spinning={pushing} />
           </button>
@@ -555,7 +1057,7 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
               <IconSparkle size={13} />
             </button>
             <textarea
-              id={`owt-gp-commit-message-${sessionId}`}
+              id={'owt-gp-commit-message-' + sessionId}
               className="owt-gp-textarea"
               placeholder={t('dialog.commit.msgPlaceholder')}
               disabled={busy || suggesting || !hasChanges}
@@ -570,8 +1072,8 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
               }}
             />
             <div className="owt-gp-textarea-foot">
-              <span className="owt-gp-subject-len" data-warn={(msg.split('\n')[0]?.length ?? 0) > 72}>
-                {msg.length > 0 ? `${msg.split('\n')[0]?.length ?? 0} / 72` : ''}
+              <span className="owt-gp-subject-len" data-warn={(msg.split(LF)[0]?.length ?? 0) > 72}>
+                {msg.length > 0 ? (msg.split(LF)[0]?.length ?? 0) + ' / 72' : ''}
               </span>
             </div>
           </div>
@@ -586,9 +1088,11 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
             <span>
               {busy
                 ? t('dialog.commit.submitting')
-                : t('dialog.commit.submit', { count: selectedFiles.size })}
+                : t('dialog.commit.submit', { count: commitCount })}
             </span>
           </button>
+
+          {hunkTouched && <div className="owt-gp-hint">{t('gp.commit.hunkHint')}</div>}
 
           {error !== undefined && (
             <div className="owt-gp-alert" data-kind="error" role="alert">
@@ -661,7 +1165,7 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
                           data-nested={group.dir !== ''}
                           data-kind={letter}
                           aria-current={isSelected ? 'true' : undefined}
-                          title={change.oldFile !== undefined ? `${change.oldFile} → ${change.file}` : change.file}
+                          title={change.oldFile !== undefined ? change.oldFile + ' → ' + change.file : change.file}
                           onClick={() => handleSelectFileRow(change.file)}
                           onKeyDown={event => {
                             if (event.target !== event.currentTarget) return
@@ -713,23 +1217,56 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
         </div>
       </aside>
 
-      {/* Right Main Area: Diff Viewer */}
+      {/* Right Main Area: Tabs (变更 diff / 日志 log / 比较 compare) */}
       <section className="owt-gp-main" role="region" aria-label={t('view.gitTab')}>
-        {hasChanges && (
-          <div className="owt-gp-main-bar">
-            <div className="owt-gp-main-crumb">
-              {viewMode === 'single' && activeFile !== null ? (
-                <>
-                  <IconFile size={13.5} />
-                  <span className="owt-gp-crumb-text" title={activeFile}>{activeFile}</span>
-                </>
-              ) : (
-                <span className="owt-gp-crumb-text">
-                  {t('dialog.commit.changes')} · {totalChanges}
-                </span>
-              )}
+        <div className="owt-gp-main-bar">
+          <div className="owt-gp-main-crumb">
+            {tab !== 'changes' ? (
+              <span className="owt-gp-crumb-text">
+                {tab === 'log' ? t('gp.tab.log') : t('gp.tab.compare')}
+              </span>
+            ) : viewMode === 'single' && activeFile !== null ? (
+              <>
+                <IconFile size={13.5} />
+                <span className="owt-gp-crumb-text" title={activeFile}>{activeFile}</span>
+              </>
+            ) : (
+              <span className="owt-gp-crumb-text">
+                {t('dialog.commit.changes')} · {totalChanges}
+              </span>
+            )}
+          </div>
+          <div className="owt-gp-main-actions">
+            <div className="owt-gp-seg" role="tablist" aria-label={t('view.gitTab')}>
+              <button
+                type="button"
+                className="owt-gp-seg-btn"
+                data-active={tab === 'changes'}
+                aria-pressed={tab === 'changes'}
+                onClick={() => switchTab('changes')}
+              >
+                {t('gp.tab.changes')}
+              </button>
+              <button
+                type="button"
+                className="owt-gp-seg-btn"
+                data-active={tab === 'log'}
+                aria-pressed={tab === 'log'}
+                onClick={() => switchTab('log')}
+              >
+                {t('gp.tab.log')}
+              </button>
+              <button
+                type="button"
+                className="owt-gp-seg-btn"
+                data-active={tab === 'compare'}
+                aria-pressed={tab === 'compare'}
+                onClick={() => switchTab('compare')}
+              >
+                {t('gp.tab.compare')}
+              </button>
             </div>
-            <div className="owt-gp-main-actions">
+            {tab === 'changes' && hasChanges && history === null && blame === null && (
               <div className="owt-gp-seg" role="group" aria-label={t('dialog.commit.changes')}>
                 <button
                   type="button"
@@ -750,6 +1287,8 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
                   {t('dialog.commit.modeAll')}
                 </button>
               </div>
+            )}
+            {tab === 'changes' && hasChanges && history === null && blame === null && (
               <button
                 type="button"
                 className="owt-gp-iconbtn"
@@ -761,39 +1300,240 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
               >
                 <IconWhitespace size={13.5} />
               </button>
-            </div>
+            )}
+            {tab === 'log' && (
+              <>
+                <input
+                  type="text"
+                  className="owt-gp-filter"
+                  value={logQuery}
+                  placeholder={t('gp.log.filter')}
+                  aria-label={t('gp.log.filter')}
+                  onChange={event => setLogQuery(event.target.value)}
+                />
+                <div className="owt-gp-seg" role="group" aria-label={t('gp.tab.log')}>
+                  <button
+                    type="button"
+                    className="owt-gp-seg-btn"
+                    data-active={logRange === 'all'}
+                    aria-pressed={logRange === 'all'}
+                    disabled={logLoading}
+                    onClick={() => setLogRange('all')}
+                  >
+                    {t('gp.log.all')}
+                  </button>
+                  <button
+                    type="button"
+                    className="owt-gp-seg-btn"
+                    data-active={logRange === 'ahead'}
+                    aria-pressed={logRange === 'ahead'}
+                    disabled={logLoading || upstream === undefined}
+                    title={upstream === undefined ? t('gp.log.noUpstream') : undefined}
+                    onClick={() => setLogRange('ahead')}
+                  >
+                    {t('gp.log.ahead')}
+                  </button>
+                </div>
+              </>
+            )}
+            {tab === 'compare' && (
+              <select
+                className="owt-gp-select"
+                value={compareRef ?? ''}
+                aria-label={t('gp.compare.pick')}
+                onChange={event => {
+                  const v = event.target.value
+                  if (v !== '') void loadCompare(v)
+                }}
+              >
+                <option value="" disabled>
+                  {t('gp.compare.pick')}
+                </option>
+                {localBranches.map(b => (
+                  <option key={b} value={b}>{b}</option>
+                ))}
+              </select>
+            )}
           </div>
-        )}
+        </div>
 
         <div className="owt-gp-diff-scroll" ref={diffScrollRef}>
-          {loading && diff === null && (
-            <div className="owt-gp-empty-full">
-              <div className="owt-gp-empty-sub">{t('dialog.commit.loading')}</div>
-            </div>
-          )}
-          {!loading && !hasChanges && (
-            <div className="owt-gp-empty-full">
-              <div className="owt-gp-empty-icon" data-clean="true">
-                <IconCheck size={22} />
-              </div>
-              <div className="owt-gp-empty-title">{t('dialog.commit.clean')}</div>
-              <div className="owt-gp-empty-sub">{t('dialog.commit.cleanSub')}</div>
-            </div>
-          )}
-          {hasChanges && (
-            <div className="owt-gp-cards">
-              {renderedChanges.map(change =>
-                renderDiffCard(change, viewMode === 'single' ? MAX_FILE_RENDER_LINES : Math.ceil(MAX_ALL_RENDER_LINES / Math.max(1, renderedChanges.length))),
+          {tab === 'changes' && (
+            <>
+              {history !== null ? (
+                renderHistory()
+              ) : blame !== null || blameLoading ? (
+                renderBlame()
+              ) : detail !== null ? (
+                renderDetail()
+              ) : (
+                <>
+                  {loading && diff === null && (
+                    <div className="owt-gp-empty-full">
+                      <div className="owt-gp-empty-sub">{t('dialog.commit.loading')}</div>
+                    </div>
+                  )}
+                  {!loading && !hasChanges && (
+                    <div className="owt-gp-empty-full">
+                      <div className="owt-gp-empty-icon" data-clean="true">
+                        <IconCheck size={22} />
+                      </div>
+                      <div className="owt-gp-empty-title">{t('dialog.commit.clean')}</div>
+                      <div className="owt-gp-empty-sub">{t('dialog.commit.cleanSub')}</div>
+                    </div>
+                  )}
+                  {hasChanges && (
+                    <div className="owt-gp-cards">
+                      {renderedChanges.map(change =>
+                        renderDiffCard(
+                          change,
+                          viewMode === 'single'
+                            ? MAX_FILE_RENDER_LINES
+                            : Math.ceil(MAX_ALL_RENDER_LINES / Math.max(1, renderedChanges.length)),
+                          parsedMap,
+                          false,
+                        ),
+                      )}
+                      {diff?.truncated === true && (
+                        <div className="owt-gp-truncated">
+                          {t('dialog.commit.truncated', { count: MAX_ALL_RENDER_LINES })}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </>
               )}
-              {diff?.truncated && (
-                <div className="owt-gp-truncated">
-                  {t('dialog.commit.truncated', { count: MAX_ALL_RENDER_LINES })}
+            </>
+          )}
+
+          {tab === 'log' && (
+            <>
+              {detail !== null ? (
+                renderDetail()
+              ) : logLoading && logCommits === null ? (
+                <div className="owt-gp-empty-full">
+                  <div className="owt-gp-empty-sub">{t('dialog.commit.loading')}</div>
+                </div>
+              ) : shownLog === null || shownLog.length === 0 ? (
+                <div className="owt-gp-empty-full">
+                  <div className="owt-gp-empty-sub">{t('gp.log.empty')}</div>
+                </div>
+              ) : (
+                renderCommitList(
+                  shownLog,
+                  hash => { void openCommit(hash) },
+                  logTruncated ? <div className="owt-gp-truncated">{t('gp.log.limit', { count: LOG_LIMIT })}</div> : undefined,
+                )
+              )}
+            </>
+          )}
+
+          {tab === 'compare' && (
+            <>
+              {detail !== null ? (
+                renderDetail()
+              ) : compareRef === null ? (
+                <div className="owt-gp-empty-full">
+                  <div className="owt-gp-empty-sub">{t('gp.compare.pickHint')}</div>
+                </div>
+              ) : compareLoading && compareData === null ? (
+                <div className="owt-gp-empty-full">
+                  <div className="owt-gp-empty-sub">{t('dialog.commit.loading')}</div>
+                </div>
+              ) : compareData === null ? (
+                <div className="owt-gp-empty-full">
+                  <div className="owt-gp-empty-sub">{t('gp.compare.empty', { ref: compareRef })}</div>
+                </div>
+              ) : (
+                <div className="owt-gp-cards">
+                  {compareData.commits.length > 0 &&
+                    renderCommitList(compareData.commits, hash => { void openCommit(hash) })}
+                  {compareData.commits.length === 0 && (
+                    <div className="owt-gp-empty-full">
+                      <div className="owt-gp-empty-sub">{t('gp.compare.empty', { ref: compareRef })}</div>
+                    </div>
+                  )}
+                  {compareData.changes.length > 0 &&
+                    compareData.changes.map(change =>
+                      renderDiffCard(
+                        change,
+                        Math.ceil(MAX_ALL_RENDER_LINES / Math.max(1, compareData.changes.length)),
+                        compareParsedMap,
+                        true,
+                      ),
+                    )}
+                  {compareData.truncated === true && (
+                    <div className="owt-gp-truncated">
+                      {t('dialog.commit.truncated', { count: MAX_ALL_RENDER_LINES })}
+                    </div>
+                  )}
                 </div>
               )}
-            </div>
+            </>
           )}
         </div>
       </section>
+
+      {/* Push confirmation overlay */}
+      {pushOpen && (
+        <div
+          className="owt-gp-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label={t('gp.push.title', { count: pushAhead?.length ?? ahead })}
+          onClick={event => {
+            if (event.target === event.currentTarget && !pushing) setPushOpen(false)
+          }}
+        >
+          <div className="owt-gp-overlay-box">
+            <div className="owt-gp-overlay-title">
+              {t('gp.push.title', { count: pushAhead?.length ?? ahead })}
+              <span className="owt-gp-detail-meta"> → {upstream}</span>
+            </div>
+            <div className="owt-gp-overlay-list">
+              {pushAhead === null ? (
+                <div className="owt-gp-side-hint">{t('dialog.commit.loading')}</div>
+              ) : pushAhead.length === 0 ? (
+                <div className="owt-gp-side-hint">{t('gp.push.empty')}</div>
+              ) : (
+                pushAhead.map(c => (
+                  <div key={c.hash} className="owt-gp-commit-row" role="presentation">
+                    <span className="owt-gp-commit-hash" title={c.hash}>{c.shortHash}</span>
+                    <span className="owt-gp-commit-subj" title={c.subject}>{c.subject}</span>
+                  </div>
+                ))
+              )}
+            </div>
+            <label className="owt-gp-checkall" title={t('gp.push.forceLease')}>
+              <input
+                type="checkbox"
+                checked={forceLease}
+                onChange={event => setForceLease(event.target.checked)}
+              />
+              <span className="owt-gp-tree-title">{t('gp.push.forceLease')}</span>
+            </label>
+            <div className="owt-gp-overlay-actions">
+              <button
+                type="button"
+                className="owt-gp-headbtn"
+                disabled={pushing}
+                onClick={() => setPushOpen(false)}
+              >
+                {t('gp.push.cancel')}
+              </button>
+              <button
+                type="button"
+                className="owt-gp-submit owt-gp-push-confirm"
+                disabled={pushing}
+                onClick={() => { void handlePush(forceLease) }}
+              >
+                <IconPush size={13} spinning={pushing} />
+                <span>{pushing ? t('dialog.commit.submitting') : t('gp.push.confirm')}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

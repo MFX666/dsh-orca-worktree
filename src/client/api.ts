@@ -5,13 +5,19 @@
  */
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import type {
+  WorktreeApplyPatchValue,
   WorktreeArchivedMetaValue,
+  WorktreeBlameValue,
   WorktreeBranchesValue,
+  WorktreeCommitDetailValue,
   WorktreeCommitValue,
+  WorktreeCompareValue,
   WorktreeCreateValue,
   WorktreeDiffValue,
   WorktreeEnsureWorkspaceValue,
   WorktreeEnvelope,
+  WorktreeHunkPatch,
+  WorktreeLogValue,
   WorktreeOverviewValue,
   WorktreePinValue,
   WorktreePushValue,
@@ -33,9 +39,29 @@ export interface WorktreeApi {
   remove(path: string, force: boolean, deleteRemote?: boolean, signal?: AbortSignal): Promise<WorktreeRemoveValue>
   status(path: string, signal?: AbortSignal): Promise<WorktreeStatusValue>
   diff(path: string, signal?: AbortSignal, file?: string, ignoreWhitespace?: boolean): Promise<WorktreeDiffValue>
-  commit(path: string, message: string, files: readonly string[], signal?: AbortSignal): Promise<WorktreeCommitValue>
-  push(path: string, signal?: AbortSignal): Promise<WorktreePushValue>
+  commit(
+    path: string,
+    message: string,
+    files: readonly string[],
+    opts?: { hunks?: readonly WorktreeHunkPatch[] },
+    signal?: AbortSignal,
+  ): Promise<WorktreeCommitValue>
+  push(path: string, opts?: { forceWithLease?: boolean }, signal?: AbortSignal): Promise<WorktreePushValue>
   suggestCommitMessage(path: string, signal?: AbortSignal): Promise<WorktreeSuggestMessageValue>
+  log(
+    path: string,
+    opts?: { refRange?: string; file?: string; limit?: number },
+    signal?: AbortSignal,
+  ): Promise<WorktreeLogValue>
+  showCommit(path: string, hash: string, signal?: AbortSignal): Promise<WorktreeCommitDetailValue>
+  compare(path: string, ref: string, signal?: AbortSignal): Promise<WorktreeCompareValue>
+  blame(path: string, file: string, signal?: AbortSignal): Promise<WorktreeBlameValue>
+  applyPatch(
+    path: string,
+    patch: string,
+    opts?: { cached?: boolean; reverse?: boolean },
+    signal?: AbortSignal,
+  ): Promise<WorktreeApplyPatchValue>
 }
 
 const NAMESPACE = 'rWorktreeManager'
@@ -85,8 +111,32 @@ export function createWorktreeApi(ctx: ClientContext): WorktreeApi {
         },
         signal,
       ),
-    commit: (path, message, files, signal) => call('commit', { path, message, files }, signal),
-    push: (path, signal) => call('push', { path }, signal),
+    commit: (path, message, files, opts, signal) =>
+      call('commit', {
+        path,
+        message,
+        files,
+        ...(opts?.hunks !== undefined ? { hunks: opts.hunks } : {}),
+      }, signal),
+    push: (path, opts, signal) =>
+      call('push', { path, ...(opts?.forceWithLease === true ? { forceWithLease: true } : {}) }, signal),
     suggestCommitMessage: (path, signal) => call('suggestCommitMessage', { path }, signal),
+    log: (path, opts, signal) =>
+      call('log', {
+        path,
+        ...(opts?.refRange !== undefined ? { refRange: opts.refRange } : {}),
+        ...(opts?.file !== undefined ? { file: opts.file } : {}),
+        ...(opts?.limit !== undefined ? { limit: opts.limit } : {}),
+      }, signal),
+    showCommit: (path, hash, signal) => call('showCommit', { path, hash }, signal),
+    compare: (path, ref, signal) => call('compare', { path, ref }, signal),
+    blame: (path, file, signal) => call('blame', { path, file }, signal),
+    applyPatch: (path, patch, opts, signal) =>
+      call('applyPatch', {
+        path,
+        patch,
+        ...(opts?.cached === true ? { cached: true } : {}),
+        ...(opts?.reverse === true ? { reverse: true } : {}),
+      }, signal),
   }
 }
