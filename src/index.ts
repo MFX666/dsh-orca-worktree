@@ -938,7 +938,9 @@ export default class WorktreeManagerService extends TypertRemoteService {
       ahead = Number.parseInt(aheadText ?? '0', 10)
       behind = Number.parseInt(behindText ?? '0', 10)
     }
-    return { path: canonical, branch: branch ?? 'detached', dirtyCount, ahead, behind }
+    const up = await run(canonical, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}'], [0, 1, 128])
+    const upstream = up.exitCode === 0 ? (up.stdout.trim() || undefined) : undefined
+    return { path: canonical, branch: branch ?? 'detached', dirtyCount, ahead, behind, upstream }
   }
 
   /** Parse `git status --porcelain -z` (with `--untracked-files=all`) + `--numstat` into change rows. */

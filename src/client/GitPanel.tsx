@@ -69,29 +69,6 @@ function buildGroups(
     .map(([dir, files]) => ({ dir, files }))
 }
 
-/** 5-block visual diffstat bar like GitHub PR file headers. */
-function DiffStatBlocks({ add, del }: { add: number; del: number }): ReactElement | null {
-  const total = add + del
-  if (total === 0) return null
-  const blocks = 5
-  const addBlocks = Math.round((add / total) * blocks)
-  const delBlocks = Math.min(blocks - addBlocks, del > 0 ? Math.max(1, blocks - addBlocks) : 0)
-  const neutral = Math.max(0, blocks - addBlocks - delBlocks)
-  return (
-    <span className="owt-gp-blocks" aria-hidden>
-      {Array.from({ length: addBlocks }).map((_, idx) => (
-        <span key={`a${idx}`} className="owt-gp-block" data-kind="add" />
-      ))}
-      {Array.from({ length: delBlocks }).map((_, idx) => (
-        <span key={`d${idx}`} className="owt-gp-block" data-kind="del" />
-      ))}
-      {Array.from({ length: neutral }).map((_, idx) => (
-        <span key={`n${idx}`} className="owt-gp-block" />
-      ))}
-    </span>
-  )
-}
-
 /** Session summary slice needed to resolve a conversation's checkout. */
 export interface SessionSummarySlice {
   readonly ids: readonly string[]
@@ -132,6 +109,28 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
   const [loadingFile, setLoadingFile] = useState<string | null>(null)
 
   const diffScrollRef = useRef<HTMLDivElement | null>(null)
+  const rootRef = useRef<HTMLDivElement | null>(null)
+  // Host tab wrappers are not guaranteed to constrain height; pin the workbench
+  // to the viewport so internal panes scroll (and sticky headers stick).
+  const [rootHeight, setRootHeight] = useState<string>('100%')
+  useEffect(() => {
+    const el = rootRef.current
+    if (el === null) return
+    const update = () => {
+      const top = el.getBoundingClientRect().top
+      setRootHeight(top > 1 ? `calc(100dvh - ${Math.round(top)}px)` : '100%')
+    }
+    update()
+    const observer = new ResizeObserver(update)
+    observer.observe(document.documentElement)
+    window.addEventListener('resize', update)
+    window.addEventListener('scroll', update, { passive: true })
+    return () => {
+      observer.disconnect()
+      window.removeEventListener('resize', update)
+      window.removeEventListener('scroll', update)
+    }
+  }, [])
   const cardRefs = useRef<Map<string, HTMLElement>>(new Map())
   const attemptedFilesRef = useRef<Set<string>>(new Set())
   const loadCtrlRef = useRef<AbortController | null>(null)
@@ -294,7 +293,10 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
       setActiveFile(file)
       if (viewMode === 'all') {
         const el = cardRefs.current.get(file)
-        el?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+        el?.scrollIntoView({
+          behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
+          block: 'start',
+        })
       } else if (diffScrollRef.current !== null) {
         diffScrollRef.current.scrollTop = 0
       }
@@ -419,7 +421,12 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
         }}
         className="owt-gp-card"
       >
-        <header className="owt-gp-card-head" onClick={() => toggleCard(change.file)}>
+        <button
+          type="button"
+          className="owt-gp-card-head"
+          aria-expanded={!isCollapsed}
+          onClick={() => toggleCard(change.file)}
+        >
           <span className="owt-gp-chevron">
             <IconChevron open={!isCollapsed} size={12} />
           </span>
@@ -436,9 +443,8 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
           <span className="owt-gp-card-stats">
             {add > 0 && <span className="owt-gp-add">+{add}</span>}
             {del > 0 && <span className="owt-gp-del">−{del}</span>}
-            <DiffStatBlocks add={add} del={del} />
           </span>
-        </header>
+        </button>
 
         {!isCollapsed && (
           <div className="owt-gp-card-body">
@@ -448,26 +454,26 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
               </div>
             ) : (
               <div className="owt-gp-table-wrap">
-                <table className="owt-gp-table">
+                <table className="owt-gp-table" aria-label={change.file}>
                   <tbody>
                     {slicedRows.map((row, idx) => {
                       if (row.kind === 'hunk') {
+                        // Orca-style collapsed-context strip; header text kept for tooltip/AT only.
+                        const hunkLabel = row.hunkContext !== undefined && row.hunkContext !== ''
+                          ? `${row.hunkHeader} ${row.hunkContext}`
+                          : row.hunkHeader
                         return (
-                          <tr key={idx} className="owt-gp-tr-hunk">
-                            <td className="owt-gp-td-num owt-gp-td-hunk-gutter" colSpan={2}>
-                              ⋯
-                            </td>
-                            <td className="owt-gp-td-hunk" colSpan={2}>
-                              <span className="owt-gp-hunk-range">{row.hunkHeader}</span>
-                              {row.hunkContext && <span className="owt-gp-hunk-ctx">{row.hunkContext}</span>}
+                          <tr key={idx} className="owt-gp-tr-hunk" title={hunkLabel}>
+                            <td className="owt-gp-td-hunk" colSpan={3}>
+                              <span className="owt-gp-hunk-strip" aria-hidden="true" />
+                              <span className="owt-gp-visually-hidden">{hunkLabel}</span>
                             </td>
                           </tr>
                         )
                       }
                       return (
                         <tr key={idx} className={`owt-gp-tr owt-gp-tr--${row.kind}`}>
-                          <td className="owt-gp-td-num">{row.oldNo ?? ''}</td>
-                          <td className="owt-gp-td-num">{row.newNo ?? ''}</td>
+                          <td className="owt-gp-td-num">{row.newNo ?? row.oldNo ?? ''}</td>
                           <td className="owt-gp-td-sign">{row.sign}</td>
                           <td className="owt-gp-td-code">{renderCode(row)}</td>
                         </tr>
@@ -489,20 +495,19 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
   }
 
   return (
-    <div className="owt-gp-root">
+    <div className="owt-gp-root" ref={rootRef} style={{ height: rootHeight }}>
       {/* Left Sidebar: Source Control & File Tree */}
-      <aside className="owt-gp-sidebar">
-        <div className="owt-gp-branchbar">
+      <aside className="owt-gp-sidebar" aria-label={t('dialog.commit.changes')}>
+        <div className="owt-gp-branchbar" data-has-upstream={upstream !== undefined}>
           <div className="owt-gp-branch-left">
             <span className="owt-gp-branch-pill" title={path}>
               <IconGitBranch size={13} />
               <span>{branch}</span>
             </span>
-            {upstream !== undefined && (
-              <span className="owt-gp-upstream" title={upstream}>
-                <span>→ {upstream}</span>
-                {ahead > 0 && <span className="owt-gp-ahead">↑{ahead}</span>}
-                {behind > 0 && <span className="owt-gp-behind">↓{behind}</span>}
+            {(totals.add > 0 || totals.del > 0) && (
+              <span className="owt-gp-branch-totals">
+                {totals.add > 0 && <span className="owt-gp-add">+{totals.add.toLocaleString('en-US')}</span>}
+                {totals.del > 0 && <span className="owt-gp-del">−{totals.del.toLocaleString('en-US')}</span>}
               </span>
             )}
           </div>
@@ -510,7 +515,7 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
             type="button"
             className="owt-gp-iconbtn"
             title={upstream === undefined ? t('dialog.commit.pushNoUpstream') : t('dialog.commit.push', { count: ahead })}
-            aria-label={t('dialog.commit.push', { count: ahead })}
+            aria-label={upstream === undefined ? t('dialog.commit.pushNoUpstream') : t('dialog.commit.push', { count: ahead })}
             disabled={loading || refreshing || busy || pushing || (upstream !== undefined && ahead === 0)}
             onClick={() => { void handlePush() }}
           >
@@ -527,10 +532,30 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
             <IconRefresh size={13.5} spinning={loading || refreshing} />
           </button>
         </div>
+        {upstream !== undefined && (
+          <div className="owt-gp-upstream-row" title={upstream}>
+            <span className="owt-gp-upstream">→ {upstream}</span>
+            <span className="owt-gp-upstream-counts">
+              {ahead > 0 && <span className="owt-gp-ahead">↑{ahead}</span>}
+              {behind > 0 && <span className="owt-gp-behind">↓{behind}</span>}
+            </span>
+          </div>
+        )}
 
         <div className="owt-gp-composer">
           <div className="owt-gp-textarea-box">
+            <button
+              type="button"
+              className="owt-gp-aibtn"
+              title={suggesting ? t('dialog.commit.aiDoing') : t('dialog.commit.ai')}
+              aria-label={suggesting ? t('dialog.commit.aiDoing') : t('dialog.commit.ai')}
+              disabled={busy || suggesting || !hasChanges}
+              onClick={() => { void handleSuggest() }}
+            >
+              <IconSparkle size={13} />
+            </button>
             <textarea
+              id={`owt-gp-commit-message-${sessionId}`}
               className="owt-gp-textarea"
               placeholder={t('dialog.commit.msgPlaceholder')}
               disabled={busy || suggesting || !hasChanges}
@@ -548,15 +573,6 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
               <span className="owt-gp-subject-len" data-warn={(msg.split('\n')[0]?.length ?? 0) > 72}>
                 {msg.length > 0 ? `${msg.split('\n')[0]?.length ?? 0} / 72` : ''}
               </span>
-              <button
-                type="button"
-                className="owt-gp-aibtn"
-                disabled={busy || suggesting || !hasChanges}
-                onClick={() => { void handleSuggest() }}
-              >
-                <IconSparkle size={12.5} />
-                <span>{suggesting ? t('dialog.commit.aiDoing') : t('dialog.commit.ai')}</span>
-              </button>
             </div>
           </div>
 
@@ -575,12 +591,12 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
           </button>
 
           {error !== undefined && (
-            <div className="owt-gp-alert" data-kind="error">
+            <div className="owt-gp-alert" data-kind="error" role="alert">
               {t('notice.error', { message: error })}
             </div>
           )}
           {banner !== undefined && (
-            <div className="owt-gp-alert" data-kind="ok">
+            <div className="owt-gp-alert" data-kind="ok" role="status" aria-live="polite">
               {banner}
             </div>
           )}
@@ -600,12 +616,6 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
             <span className="owt-gp-tree-title">{t('dialog.commit.changes')}</span>
             <span className="owt-gp-count-pill">{totalChanges}</span>
           </label>
-          {(totals.add > 0 || totals.del > 0) && (
-            <span className="owt-gp-tree-totals">
-              {totals.add > 0 && <span className="owt-gp-add">+{totals.add}</span>}
-              {totals.del > 0 && <span className="owt-gp-del">−{totals.del}</span>}
-            </span>
-          )}
         </div>
 
         <div className="owt-gp-tree-scroll">
@@ -624,6 +634,7 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
                     <button
                       type="button"
                       className="owt-gp-dir-row"
+                      aria-expanded={!dirCollapsed}
                       onClick={() => toggleDir(group.dir)}
                     >
                       <span className="owt-gp-chevron">
@@ -648,6 +659,8 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
                           tabIndex={0}
                           data-active={isSelected}
                           data-nested={group.dir !== ''}
+                          data-kind={letter}
+                          aria-current={isSelected ? 'true' : undefined}
                           title={change.oldFile !== undefined ? `${change.oldFile} → ${change.file}` : change.file}
                           onClick={() => handleSelectFileRow(change.file)}
                           onKeyDown={event => {
@@ -661,6 +674,7 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
                           <input
                             type="checkbox"
                             className="owt-gp-file-check"
+                            aria-label={t('dialog.commit.selectFile', { file: change.file })}
                             checked={isChecked}
                             disabled={busy}
                             onClick={event => event.stopPropagation()}
@@ -676,10 +690,17 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
                             {baseName}
                           </span>
                           <span className="owt-gp-file-stats">
-                            {add > 0 && <span className="owt-gp-add">+{add}</span>}
-                            {del > 0 && <span className="owt-gp-del">−{del}</span>}
+                            {add > 0 && <span className="owt-gp-add">+{add.toLocaleString('en-US')}</span>}
+                            {del > 0 && <span className="owt-gp-del">−{del.toLocaleString('en-US')}</span>}
                           </span>
-                          {change.staged && <span className="owt-gp-staged-dot" title={t('dialog.commit.staged')} />}
+                          {change.staged && (
+                            <span
+                              className="owt-gp-staged-dot"
+                              title={t('dialog.commit.staged')}
+                              role="img"
+                              aria-label={t('dialog.commit.staged')}
+                            />
+                          )}
                           <span className="owt-gp-badge" data-kind={letter}>
                             {letter}
                           </span>
@@ -693,7 +714,7 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
       </aside>
 
       {/* Right Main Area: Diff Viewer */}
-      <main className="owt-gp-main">
+      <section className="owt-gp-main" role="region" aria-label={t('view.gitTab')}>
         {hasChanges && (
           <div className="owt-gp-main-bar">
             <div className="owt-gp-main-crumb">
@@ -708,39 +729,39 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
                 </span>
               )}
             </div>
-            <div className="owt-gp-seg" role="tablist">
+            <div className="owt-gp-main-actions">
+              <div className="owt-gp-seg" role="group" aria-label={t('dialog.commit.changes')}>
+                <button
+                  type="button"
+                  className="owt-gp-seg-btn"
+                  data-active={viewMode === 'single'}
+                  aria-pressed={viewMode === 'single'}
+                  onClick={() => setViewMode('single')}
+                >
+                  {t('dialog.commit.modeSingle')}
+                </button>
+                <button
+                  type="button"
+                  className="owt-gp-seg-btn"
+                  data-active={viewMode === 'all'}
+                  aria-pressed={viewMode === 'all'}
+                  onClick={() => setViewMode('all')}
+                >
+                  {t('dialog.commit.modeAll')}
+                </button>
+              </div>
               <button
                 type="button"
-                role="tab"
-                aria-selected={viewMode === 'single'}
-                className="owt-gp-seg-btn"
-                data-active={viewMode === 'single'}
-                onClick={() => setViewMode('single')}
+                className="owt-gp-iconbtn"
+                data-active={ignoreWs}
+                title={t('dialog.commit.ignoreWs')}
+                aria-label={t('dialog.commit.ignoreWs')}
+                aria-pressed={ignoreWs}
+                onClick={() => setIgnoreWs(v => !v)}
               >
-                {t('dialog.commit.modeSingle')}
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={viewMode === 'all'}
-                className="owt-gp-seg-btn"
-                data-active={viewMode === 'all'}
-                onClick={() => setViewMode('all')}
-              >
-                {t('dialog.commit.modeAll')}
+                <IconWhitespace size={13.5} />
               </button>
             </div>
-            <button
-              type="button"
-              className="owt-gp-iconbtn"
-              data-active={ignoreWs}
-              title={t('dialog.commit.ignoreWs')}
-              aria-label={t('dialog.commit.ignoreWs')}
-              aria-pressed={ignoreWs}
-              onClick={() => setIgnoreWs(v => !v)}
-            >
-              <IconWhitespace size={13.5} />
-            </button>
           </div>
         )}
 
@@ -772,7 +793,7 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
             </div>
           )}
         </div>
-      </main>
+      </section>
     </div>
   )
 }
