@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="640" viewBox="0 0 960 640" font-family="-apple-system, 'PingFang SC', sans-serif">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#6b7280"/>
+    </marker>
+  </defs>
+  <rect width="960" height="640" fill="#f8fafc"/>
+  <text x="480" y="42" text-anchor="middle" font-size="22" font-weight="700" fill="#0f172a">dsh-worktree-plugin 0.4.0 — 一包两 row（dsh-superagent 模式）</text>
+
+  <!-- GitHub source -->
+  <rect x="330" y="66" width="300" height="46" rx="10" fill="#111827"/>
+  <text x="480" y="95" text-anchor="middle" font-size="15" fill="#fff">github:MFX666/dsh-orca-worktree</text>
+
+  <!-- package box -->
+  <rect x="120" y="150" width="720" height="300" rx="14" fill="#eef2ff" stroke="#818cf8" stroke-width="2"/>
+  <text x="480" y="180" text-anchor="middle" font-size="16" font-weight="700" fill="#3730a3">package：dsh-worktree-plugin</text>
+  <text x="480" y="200" text-anchor="middle" font-size="12" fill="#6366f1">exports: "." → lib/index.js　·　"./review" → lib/review/index.js　·　单个 client bundle</text>
+
+  <!-- row 1 -->
+  <rect x="150" y="222" width="320" height="96" rx="10" fill="#fff" stroke="#818cf8" stroke-width="1.5"/>
+  <text x="310" y="248" text-anchor="middle" font-size="14" font-weight="700" fill="#1e293b">row: worktree-manager</text>
+  <text x="310" y="270" text-anchor="middle" font-size="12" fill="#475569">lib/index.js · rWorktreeManager</text>
+  <text x="310" y="290" text-anchor="middle" font-size="12" fill="#475569">tools: worktree_list/create/enter/</text>
+  <text x="310" y="306" text-anchor="middle" font-size="12" fill="#475569">status/pin/remove（6 个）</text>
+
+  <!-- row 2 -->
+  <rect x="490" y="222" width="320" height="96" rx="10" fill="#fff" stroke="#818cf8" stroke-width="1.5"/>
+  <text x="650" y="248" text-anchor="middle" font-size="14" font-weight="700" fill="#1e293b">row: git-review</text>
+  <text x="650" y="270" text-anchor="middle" font-size="12" fill="#475569">lib/review/index.js · rGitReview</text>
+  <text x="650" y="290" text-anchor="middle" font-size="12" fill="#475569">tools: git_diff / git_commit</text>
+  <text x="650" y="306" text-anchor="middle" font-size="12" fill="#475569">verbs: diff/commit/push/log/blame/compare…</text>
+
+  <!-- client bundle -->
+  <rect x="150" y="352" width="660" height="72" rx="10" fill="#fff" stroke="#818cf8" stroke-width="1.5"/>
+  <text x="480" y="380" text-anchor="middle" font-size="14" font-weight="700" fill="#1e293b">lib/client.js — 单一浏览器 bundle</text>
+  <text x="480" y="404" text-anchor="middle" font-size="12" fill="#475569">OrcaSidebar / ArchivedSessionsSection / contextMenu + GitPanel / diffParser / graph</text>
+
+  <!-- install arrow -->
+  <line x1="480" y1="112" x2="480" y2="146" stroke="#6b7280" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="495" y="134" font-size="12" fill="#6b7280">install_bundle</text>
+
+  <!-- arrows to UI -->
+  <line x1="480" y1="450" x2="250" y2="516" stroke="#6b7280" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="480" y1="450" x2="480" y2="516" stroke="#6b7280" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="480" y1="450" x2="710" y2="516" stroke="#6b7280" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- UI boxes -->
+  <rect x="60" y="520" width="300" height="84" rx="10" fill="#ecfdf5" stroke="#34d399" stroke-width="1.5"/>
+  <text x="210" y="548" text-anchor="middle" font-size="13" font-weight="700" fill="#065f46">Orca 侧边栏</text>
+  <text x="210" y="570" text-anchor="middle" font-size="11" fill="#047857">sidebar.workspaces @ -1</text>
+  <text x="210" y="588" text-anchor="middle" font-size="11" fill="#047857">settings.section · archived-sessions</text>
+
+  <rect x="380" y="520" width="220" height="84" rx="10" fill="#fff7ed" stroke="#fb923c" stroke-width="1.5"/>
+  <text x="490" y="548" text-anchor="middle" font-size="13" font-weight="700" fill="#7c2d12">审查 Tab</text>
+  <text x="490" y="570" text-anchor="middle" font-size="11" fill="#9a3412">conversation.view id git-review</text>
+  <text x="490" y="588" text-anchor="middle" font-size="11" fill="#9a3412">order 40 · diff/commit/push/blame</text>
+
+  <rect x="620" y="520" width="280" height="84" rx="10" fill="#eff6ff" stroke="#60a5fa" stroke-width="1.5"/>
+  <text x="760" y="548" text-anchor="middle" font-size="13" font-weight="700" fill="#1e3a8a">Agent 工具（新会话生效）</text>
+  <text x="760" y="570" text-anchor="middle" font-size="11" fill="#1d4ed8">6 × worktree_*</text>
+  <text x="760" y="588" text-anchor="middle" font-size="11" fill="#1d4ed8">git_diff · git_commit</text>
+
+  <text x="480" y="628" text-anchor="middle" font-size="11" fill="#94a3b8">一次安装 · 一个插件条目 · 两行独立激活 · 发版绑定在一起</text>
+</svg>
