@@ -1,6 +1,6 @@
 {
   "name": "dsh-worktree-plugin",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "Orca-style git worktree sidebar (chat on a branch, session archive/restore, nested lineage) + a full git review panel (diff review, hunk staging, log/blame/compare, AI commit messages, push) — one package, two rows for the DSH web UI.",
   "type": "module",
   "license": "MIT",
@@ -18,6 +18,7 @@
   "files": [
     "lib/index.js",
     "lib/review/index.js",
+    "docs/*.png",
     "review-icon.svg",
     "review/locale/*.json",
     "lib/client.js",
