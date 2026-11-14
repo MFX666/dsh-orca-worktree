@@ -1629,7 +1629,21 @@ export default class GitReviewService extends TypertRemoteService {
       },
     ]
     for (const definition of definitions) {
-      disposers.push(this.host().tools!.register(definition))
+      disposers.push(
+        this.host().tools!.register({
+          ...definition,
+          output: {
+            schema: { type: 'object' },
+            render: (_args: unknown, value: unknown) => [{ type: 'text', text: JSON.stringify(value, null, 2) }],
+          },
+          async execute(args: unknown, exec: { agent: AgentLike; signal: AbortSignal }) {
+            if (!exec?.agent || typeof exec.agent !== 'object') {
+              throw new Error('no calling agent context for git tool')
+            }
+            return definition.execute((args ?? {}) as Record<string, unknown>, exec)
+          },
+        }),
+      )
     }
   }
 }

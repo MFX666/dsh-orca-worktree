@@ -307,8 +307,13 @@ test('GitReviewService end-to-end: SRC descriptors, branches, diff/commit/push, 
     assert.equal(mapSingle.ok, true)
     assert.ok(mapSingle.value.diff.includes('diff --git a/a_bundle.js.map b/a_bundle.js.map'))
 
-    // 8. Agent tools registered cleanly (git_diff + git_commit).
+    // 8. Agent tools registered cleanly (git_diff + git_commit); each must
+    // declare output { schema, render } or the real host refuses activation.
     assert.deepEqual([...stubs.registeredTools.keys()].sort(), ['git_commit', 'git_diff'])
+    for (const def of stubs.registeredTools.values()) {
+      assert.equal(typeof def.output?.render, 'function', `${def.name} missing output.render`)
+      assert.deepEqual(def.output.schema, { type: 'object' }, `${def.name} missing output.schema`)
+    }
   } finally {
     rmSync(tempRoot, { recursive: true, force: true })
   }
