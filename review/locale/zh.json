@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Git 审查",
+    "description": "任意 git 检出的 diff 审查、暂存/分块提交、log/blame/compare、AI 提交信息与 push"
+  }
+}

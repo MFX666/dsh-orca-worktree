@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Git Review",
+    "description": "Diff review, staged/hunk commits, log/blame/compare, AI commit messages, and push for any git checkout"
+  }
+}
