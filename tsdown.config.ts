@@ -42,9 +42,11 @@ const CLIENT_EXTERNALS: readonly string[] = [...PLATFORM_MODULES]
 const nodeLibrary: UserConfig = {
   // Entry is the tsc pre-pass output: TypeScript lowers the TC39 decorators
   // (@Remote) to __decorateElement helpers — tsdown/oxc emits decorators raw,
-  // which Node cannot parse.
+  // which Node cannot parse. Two host rows live here: `index.js` (the
+  // worktree-manager row) and `review/index.js` (the git-review row, loaded
+  // through the `dsh-worktree-plugin/review` exports subpath).
   name: ID,
-  entry: [here('.tsc-out/index.js')],
+  entry: [here('.tsc-out/index.js'), here('.tsc-out/review/index.js')],
   outDir: 'lib',
   format: 'esm',
   platform: 'node',
@@ -85,4 +87,37 @@ const clientBundle: UserConfig = {
   },
 }
 
-export default [nodeLibrary, clientBundle]
+const diffParserBundle: UserConfig = {
+  // Node-safe copy of the pure git-review parser so unit tests can import it
+  // without the browser handoff wrapper. The client bundle still inlines its
+  // own copy.
+  name: `${ID}/diffParser`,
+  entry: { diffParser: 'src/client/review/diffParser.ts' },
+  outDir: 'lib',
+  format: 'esm',
+  platform: 'node',
+  target: 'es2024',
+  fixedExtension: false,
+  dts: false,
+  sourcemap: false,
+  clean: false,
+}
+
+const graphBundle: UserConfig = {
+  // Node-safe copy of the pure lane layout + decoration parser so unit tests
+  // can import it without the browser handoff wrapper. The client bundle
+  // still inlines its own copy.
+  name: `${ID}/graph`,
+  entry: { graph: 'src/client/review/graph.tsx' },
+  outDir: 'lib',
+  format: 'esm',
+  platform: 'node',
+  target: 'es2024',
+  fixedExtension: false,
+  dts: false,
+  sourcemap: false,
+  clean: false,
+  external: ['react', 'react/jsx-runtime'],
+}
+
+export default [nodeLibrary, clientBundle, diffParserBundle, graphBundle]

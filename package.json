@@ -1,7 +1,7 @@
 {
   "name": "dsh-worktree-plugin",
-  "version": "0.3.0",
-  "description": "Git worktree management panel and agent tools for the deepseek-harness web UI (list / create / enter / remove, Orca-style tree)",
+  "version": "0.4.0",
+  "description": "Git worktree management (Orca-style sidebar tree, list / create / enter / remove) + git review panel (diff review, staged/hunk commits, log/blame/compare, AI commit messages, push) for the deepseek-harness web UI — one package, two host rows",
   "type": "module",
   "license": "MIT",
   "main": "lib/index.js",
@@ -10,12 +10,16 @@
     "./client": "./lib/client.js",
     "./locale/*.json": "./locale/*.json",
     "./icon": "./icon.svg",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./review": "./lib/review/index.js"
   },
   "files": [
     "lib/index.js",
+    "lib/review/index.js",
     "lib/client.js",
     "lib/client.js.map",
+    "lib/diffParser.js",
+    "lib/graph.js",
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg"

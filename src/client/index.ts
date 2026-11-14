@@ -14,6 +14,7 @@ import { createWorktreeApi, type WorktreeApi } from './api.ts'
 import { ArchivedSessionsSection } from './ArchivedSessionsSection.tsx'
 import { IconCreate, IconRemove } from './icons.tsx'
 import { OrcaSidebar } from './OrcaSidebar.tsx'
+import { applyGitReview } from './review/index.ts'
 import { injectStyles, removeStyles } from './styles.ts'
 import { en, NS, type WorktreeKey, zh } from './locales.ts'
 
@@ -77,6 +78,8 @@ const ICON_REMOVE = 'worktreeManager.remove'
 const MENU_TARGET_WORKSPACE = 'worktreeManager.workspace'
 
 export function apply(ctx: ClientContext): void {
+  // Second module of this package (git review tab); shares the single client bundle.
+  applyGitReview(ctx)
   injectStyles()
   ctx.effect(() => () => { removeStyles() }, 'worktree-manager: styles')
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'worktree-manager: dictionaries')
