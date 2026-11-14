@@ -1,6 +1,6 @@
 {
   "name": "dsh-worktree-plugin",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "description": "Git worktree management panel and agent tools for the deepseek-harness web UI (list / create / enter / remove, Orca-style tree)",
   "type": "module",
   "license": "MIT",
@@ -14,10 +14,8 @@
   },
   "files": [
     "lib/index.js",
-    "lib/diffParser.js",
     "lib/client.js",
     "lib/client.js.map",
-    "lib/graph.js",
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg"
@@ -33,7 +31,6 @@
         "@deepseek-ai/dsh-client-locale",
         "@deepseek-ai/dsh-client-runtime",
         "@deepseek-ai/dsh-client-ui-context-menu",
-        "@deepseek-ai/dsh-client-ui-conversation",
         "@deepseek-ai/dsh-client-ui-layout",
         "@deepseek-ai/dsh-client-ui-settings-general",
         "@deepseek-ai/dsh-client-ui-sidebar",
@@ -56,7 +53,6 @@
     "@deepseek-ai/dsh-client-connection": "link:../deepseek-harness/packages/client/connection",
     "@deepseek-ai/dsh-client-locale": "link:../deepseek-harness/packages/client/locale",
     "@deepseek-ai/dsh-client-runtime": "link:../deepseek-harness/packages/client/runtime",
-    "@deepseek-ai/dsh-client-ui-conversation": "link:../deepseek-harness/packages/client/ui-conversation",
     "@deepseek-ai/dsh-client-ui-layout": "link:../deepseek-harness/packages/client/ui-layout",
     "@deepseek-ai/dsh-client-ui-slots": "link:../deepseek-harness/packages/client/ui-slots",
     "@deepseek-ai/dsh-fs": "link:../deepseek-harness/packages/fs/fs",
