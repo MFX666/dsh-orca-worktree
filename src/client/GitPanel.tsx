@@ -24,25 +24,45 @@ import type {
 } from '../protocol.ts'
 import type { WorktreeApi } from './api.ts'
 import { assemblePatch, changeLetter, filterCommits, parseStructuredDiff, type DiffLineRow, type ParsedFileDiff } from './diffParser.ts'
+import { buildGraphRows, GraphCell, decorationOf, refLabel } from './graph.tsx'
 import type { ReactNode } from 'react'
 import {
   IconBack,
   IconCheck,
   IconChevron,
-  IconFile,
   IconFolder,
   IconGitBranch,
   IconPush,
   IconRefresh,
   IconWhitespace,
   IconSparkle,
+  FileTypeGlyph,
 } from './icons.tsx'
 
 type Translate = (key: string, params?: Record<string, string | number>) => string
 
+/** Persisted UI flag (graph section collapse); storage misses keep the default. */
+function loadStoredFlag(key: string, fallback: boolean): boolean {
+  try {
+    return window.localStorage.getItem(key) === null ? fallback : window.localStorage.getItem(key) === '1'
+  } catch {
+    return fallback
+  }
+}
+
+function saveStoredFlag(key: string, value: boolean): void {
+  try {
+    window.localStorage.setItem(key, value ? '1' : '0')
+  } catch {
+    /* private mode etc. — collapse state just does not persist */
+  }
+}
+
 const MAX_FILE_RENDER_LINES = 2500
 const MAX_ALL_RENDER_LINES = 4500
 const LOG_LIMIT = 200
+/** Fixed pixel height of one graph row (keeps the SVG cell and row in sync). */
+const GRAPH_ROW_HEIGHT = 24
 /** Newline character without a backslash escape (keeps this file escape-free). */
 const LF = String.fromCharCode(10)
 
@@ -137,6 +157,8 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
   const [blame, setBlame] = useState<WorktreeBlameValue | null>(null)
   const [blameLoading, setBlameLoading] = useState(false)
   const [logCommits, setLogCommits] = useState<readonly WorktreeCommitRow[] | null>(null)
+  const [graphCommits, setGraphCommits] = useState<readonly WorktreeCommitRow[] | null>(null)
+  const [graphOpen, setGraphOpen] = useState(() => loadStoredFlag('owt.gp.graph.open', true))
   const [logTruncated, setLogTruncated] = useState(false)
   const [logRange, setLogRange] = useState<'all' | 'ahead'>('all')
   const [logQuery, setLogQuery] = useState('')
@@ -226,6 +248,26 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
     [api, ignoreWs],
   )
 
+  // Graph section (left pane, below the changes list): a windowed log feeds
+  // the lane layout. Refreshes ride the same triggers as the diff reload
+  // (mount, commit, push, dsh-worktree:refresh); failures keep the old rows.
+  const loadGraph = useCallback(
+    (targetPath: string) => {
+      api
+        .log(targetPath, { limit: LOG_LIMIT })
+        .then(value => { setGraphCommits(value.commits) })
+        .catch(() => { /* decorative section — stale rows beat an error banner */ })
+    },
+    [api],
+  )
+  const graphRows = useMemo(() => buildGraphRows(graphCommits ?? []), [graphCommits])
+  const toggleGraph = useCallback(() => {
+    setGraphOpen(open => {
+      saveStoredFlag('owt.gp.graph.open', !open)
+      return !open
+    })
+  }, [])
+
   useEffect(() => {
     if (path === undefined) {
       setDiff(null)
@@ -243,14 +285,16 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
     setBlame(null)
     setDetail(null)
     setLogCommits(null)
+    setGraphCommits(null)
     setCompareData(null)
     setCompareRef(null)
     setRepoRoot(null)
     setLocalBranches([])
     setPushOpen(false)
     void loadWorkspaceDiff(path, true)
+    void loadGraph(path)
     return () => loadCtrlRef.current?.abort()
-  }, [loadWorkspaceDiff, path])
+  }, [loadWorkspaceDiff, loadGraph, path])
 
   useEffect(() => {
     if (banner === undefined) return
@@ -437,9 +481,10 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
         setPushing(false)
         // Reload so ahead/behind and the upstream pill reflect the push.
         void loadWorkspaceDiff(path, false)
+        if (path !== undefined) loadGraph(path)
       }
     },
-    [api, busy, loadWorkspaceDiff, loading, path, pushing, refreshing, t],
+    [api, busy, loadGraph, loadWorkspaceDiff, loading, path, pushing, refreshing, t],
   )
 
   // Push button: without an upstream keep the legacy direct push; with one, open the confirm overlay.
@@ -653,12 +698,13 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
       setBanner(t('notice.committed', { commit: committed.commit, summary: committed.summary }))
       window.dispatchEvent(new CustomEvent('dsh-worktree:refresh'))
       await loadWorkspaceDiff(path, false)
+      loadGraph(path)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
       setBusy(false)
     }
-  }, [api, busy, diff, hunkReadyFiles, hunkSel, loadWorkspaceDiff, msg, parsedMap, path, selectedFiles, suggesting, t])
+  }, [api, busy, diff, hunkReadyFiles, hunkSel, loadGraph, loadWorkspaceDiff, msg, parsedMap, path, selectedFiles, suggesting, t])
 
   const renderedChanges = useMemo(() => {
     if (diff === null || diff.changes.length === 0) return []
@@ -1185,7 +1231,7 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
                             onChange={() => toggleCheckFile(change.file)}
                           />
                           <span className="owt-gp-file-icon">
-                            <IconFile size={13} />
+                            <FileTypeGlyph path={change.file} size={13} />
                           </span>
                           {change.oldFile !== undefined && (
                             <span className="owt-gp-oldname">{change.oldFile.slice(change.oldFile.lastIndexOf('/') + 1)} →</span>
@@ -1215,6 +1261,63 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
               )
             })}
         </div>
+
+        <div className="owt-gp-graph" data-open={graphOpen}>
+          <button type="button" className="owt-gp-graph-head" aria-expanded={graphOpen} onClick={toggleGraph}>
+            <span className="owt-gp-chevron">
+              <IconChevron open={graphOpen} size={11} />
+            </span>
+            <IconGitBranch size={12} />
+            <span className="owt-gp-graph-title">{t('gp.graph.title')}</span>
+            <span className="owt-gp-count-pill">{graphCommits?.length ?? 0}</span>
+          </button>
+          {graphOpen && (
+            <div className="owt-gp-graph-scroll" role="list">
+              {graphRows.length === 0 && <div className="owt-gp-side-hint">{t('gp.graph.empty')}</div>}
+              {graphRows.map(row => {
+                const decorations = row.commit.refs.map(decorationOf)
+                const shown = decorations.slice(0, 3)
+                const hidden = decorations.length - shown.length
+                return (
+                  <div
+                    key={row.commit.hash}
+                    role="listitem"
+                    className="owt-gp-graph-row"
+                    tabIndex={0}
+                    title={
+                      row.commit.subject + LF + row.commit.author + ' · ' + fmtDate(row.commit.date) + ' · ' + row.commit.shortHash
+                    }
+                    onClick={() => { void openCommit(row.commit.hash) }}
+                    onKeyDown={event => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault()
+                        void openCommit(row.commit.hash)
+                      }
+                    }}
+                  >
+                    <GraphCell row={row} height={GRAPH_ROW_HEIGHT} />
+                    {shown.map((decoration, index) => (
+                      <span
+                        key={decoration.kind + ':' + decoration.name + ':' + String(index)}
+                        className={'owt-gp-ref owt-gp-ref-' + decoration.kind}
+                        title={refLabel(decoration)}
+                      >
+                        {refLabel(decoration)}
+                      </span>
+                    ))}
+                    {hidden > 0 && (
+                      <span className="owt-gp-ref owt-gp-ref-more" title={t('gp.graph.more', { count: hidden })}>
+                        +{String(hidden)}
+                      </span>
+                    )}
+                    <span className="owt-gp-graph-subject">{row.commit.subject}</span>
+                    <span className="owt-gp-graph-date">{fmtDate(row.commit.date)}</span>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </div>
       </aside>
 
       {/* Right Main Area: Tabs (变更 diff / 日志 log / 比较 compare) */}
@@ -1227,7 +1330,7 @@ export function CommitPanel(props: CommitPanelProps): ReactElement {
               </span>
             ) : viewMode === 'single' && activeFile !== null ? (
               <>
-                <IconFile size={13.5} />
+                <FileTypeGlyph path={activeFile} size={13.5} />
                 <span className="owt-gp-crumb-text" title={activeFile}>{activeFile}</span>
               </>
             ) : (

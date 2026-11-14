@@ -1,6 +1,6 @@
 {
   "name": "dsh-worktree-plugin",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Git worktree management panel and agent tools for the deepseek-harness web UI (list / create / enter / remove, Orca-style tree)",
   "type": "module",
   "license": "MIT",
@@ -17,6 +17,7 @@
     "lib/diffParser.js",
     "lib/client.js",
     "lib/client.js.map",
+    "lib/graph.js",
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg"

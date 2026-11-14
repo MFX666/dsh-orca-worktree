@@ -102,7 +102,7 @@ const NOISY_DIFF_PATHSPECS = [
 
 // P0 git review: `git log --pretty` with 0x1f field / 0x1e record separators so
 // authors and subjects containing tabs or newlines can never corrupt parsing.
-const LOG_FORMAT = '%H%x1f%h%x1f%an%x1f%ae%x1f%aI%x1f%s%x1f%b%x1e'
+const LOG_FORMAT = '%H%x1f%h%x1f%an%x1f%ae%x1f%aI%x1f%s%x1f%b%x1f%d%x1f%P%x1e'
 const DEFAULT_LOG_LIMIT = 200
 const MAX_LOG_LIMIT = 1000
 const MAX_BLAME_LINES = 5000
@@ -458,6 +458,13 @@ function parseCommitLogRows(stdout: string): WorktreeCommitRow[] {
     const fields = record.split('\u001f')
     if (fields.length < 6) continue
     const body = (fields[6] ?? '').replace(/\n+$/, '')
+    // `%d` renders as ` (HEAD -> main, origin/main)` with a leading space, or ''.
+    const decorationsRaw = (fields[7] ?? '').trim()
+    const refs =
+      decorationsRaw.startsWith('(') && decorationsRaw.endsWith(')')
+        ? decorationsRaw.slice(1, -1).split(',').map(item => item.trim()).filter(item => item.length > 0)
+        : []
+    const parents = (fields[8] ?? '').split(' ').filter(hash => hash.length > 0)
     rows.push({
       hash: fields[0]!,
       shortHash: fields[1]!,
@@ -466,6 +473,8 @@ function parseCommitLogRows(stdout: string): WorktreeCommitRow[] {
       date: fields[4]!,
       subject: fields[5]!,
       ...(body.length > 0 ? { body } : {}),
+      parents,
+      refs,
     })
   }
   return rows

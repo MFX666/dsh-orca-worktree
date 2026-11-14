@@ -206,6 +206,10 @@ export interface WorktreeCommitRow {
   readonly date: string
   readonly subject: string
   readonly body?: string
+  /** Parent hashes, first parent first (git `%P`); empty for root commits. */
+  readonly parents: readonly string[]
+  /** Ref decorations pointing at this commit (git `%d`, e.g. `HEAD -> main`, `origin/main`, `tag: v1`). */
+  readonly refs: readonly string[]
 }
 
 /** `log` outcome — branch/file/range commit list. */

@@ -49,3 +49,25 @@ declare module '@deepseek-ai/dsh-client-locale/client' {}
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   export interface LocaleNamespaceMap {}
 }
+
+declare module '@deepseek-ai/dsh-client-ui-primitives' {
+  import type { ComponentType } from 'react'
+
+  export interface FileTypeIconProps {
+    /** File path — the host classifies the type from the extension. */
+    path?: string
+    /** Explicit kind for entries without a classifiable path (directories). */
+    kind?: 'folder' | string
+    size?: number
+    className?: string
+  }
+
+  export const FileTypeIcon: ComponentType<FileTypeIconProps>
+}
+
+/**
+ * The client bundle is CJS inside `window.__ModuleLoader__.load(…, factory(require))`;
+ * bare `require` resolves through the shell's frozen module table. Only for the
+ * guarded seed-module probe in `src/client/icons.tsx` — never in the node half.
+ */
+declare function require(id: string): unknown

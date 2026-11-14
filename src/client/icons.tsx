@@ -209,6 +209,26 @@ export function IconFile({ size = 13 }: { size?: number }): ReactElement {
   )
 }
 
+/* The host's per-type file icon (ui-primitives FileTypeIcon — the seed module,
+   answered by the shell's frozen module table, same channel dsh-ide-git uses).
+   Resolved through a GUARDED require at load: a shell without the module keeps
+   this plugin alive and the glyph falls back to the generic file outline. */
+let uiPrimitives: { FileTypeIcon?: (props: { path?: string; kind?: string; size?: number; className?: string }) => ReactElement | null } | null = null
+try {
+  uiPrimitives = require('@deepseek-ai/dsh-client-ui-primitives') as typeof uiPrimitives
+} catch {
+  uiPrimitives = null
+}
+
+/** Per-type icon for a file path; generic outline when the host lacks the seed module. */
+export function FileTypeGlyph({ path, size = 13 }: { path: string; size?: number }): ReactElement {
+  const FileTypeIcon = uiPrimitives?.FileTypeIcon
+  if (typeof FileTypeIcon === 'function') {
+    return <FileTypeIcon path={path} size={size} className="owt-filetype-icon" />
+  }
+  return <IconFile size={size} />
+}
+
 export function IconCheck({ size = 13 }: { size?: number }): ReactElement {
   return (
     <svg viewBox="0 0 16 16" width={size} height={size} fill="none" stroke="currentColor" strokeWidth={1.65} strokeLinecap="round" strokeLinejoin="round" aria-hidden>

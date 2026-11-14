@@ -2227,6 +2227,113 @@ button.owt-gp-commit-row:hover {
   width: auto;
   min-width: 120px;
 }
+
+/* ---- commit graph (left pane, below the changes tree) ---- */
+.owt-gp-graph {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-top: 1px solid var(--owt-gp-hairline);
+  background: var(--dsw-alias-bg-base);
+}
+.owt-gp-graph[data-open='true'] {
+  height: 42%;
+  min-height: 140px;
+}
+.owt-gp-graph-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+}
+.owt-gp-graph-head:hover {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, 0.08));
+}
+.owt-gp-graph-title {
+  flex: none;
+}
+.owt-gp-graph-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 6px 10px;
+}
+.owt-gp-graph-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  padding: 0 4px 0 0;
+  border-radius: 6px;
+  cursor: pointer;
+  min-width: 0;
+}
+.owt-gp-graph-row:hover {
+  background: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, 0.08));
+}
+.owt-gp-graph-row:focus-visible {
+  outline: 1px solid var(--dsw-alias-border-focus, var(--owt-gp-hairline));
+}
+.owt-gp-graph-cell {
+  flex: none;
+  display: block;
+}
+.owt-gp-ref {
+  flex: none;
+  max-width: 110px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 2px 5px;
+  border-radius: 999px;
+  background: var(--dsw-alias-interactive-bg-hover, rgba(127, 127, 127, 0.12));
+  color: var(--dsw-alias-label-secondary);
+}
+.owt-gp-ref-head {
+  color: var(--dsw-alias-state-success-primary, #3fb950);
+}
+.owt-gp-ref-local {
+  color: var(--dsw-alias-brand-primary, #4d6bfe);
+}
+.owt-gp-ref-remote {
+  color: #b083f0;
+}
+.owt-gp-ref-tag {
+  color: var(--dsw-alias-state-warn-primary, #e2a03f);
+}
+.owt-gp-ref-more {
+  color: var(--dsw-alias-label-tertiary, var(--dsw-alias-label-secondary));
+  cursor: help;
+}
+.owt-gp-graph-subject {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--dsw-alias-label-primary);
+}
+.owt-gp-graph-date {
+  flex: none;
+  font-family: var(--owt-font-code);
+  font-size: 10.5px;
+  color: var(--dsw-alias-label-tertiary, var(--dsw-alias-label-secondary));
+}
 `
 
 export function injectStyles(): void {

@@ -100,4 +100,21 @@ const diffParserBundle: UserConfig = {
   clean: false,
 }
 
-export default [nodeLibrary, clientBundle, diffParserBundle]
+const graphBundle: UserConfig = {
+  // Node-safe copy of the pure lane layout + decoration parser so unit tests
+  // can import it without the browser handoff wrapper. The client bundle
+  // still inlines its own copy.
+  name: `${ID}/graph`,
+  entry: { graph: 'src/client/graph.tsx' },
+  outDir: 'lib',
+  format: 'esm',
+  platform: 'node',
+  target: 'es2024',
+  fixedExtension: false,
+  dts: false,
+  sourcemap: false,
+  clean: false,
+  external: ['react', 'react/jsx-runtime'],
+}
+
+export default [nodeLibrary, clientBundle, diffParserBundle, graphBundle]
