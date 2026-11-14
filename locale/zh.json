@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Git 工作树侧边栏",
-    "description": "Orca 风格左栏仓库与工作树分支树：点击分支直接对话、多对话展开、星标置顶、子工作树谱系嵌套与 Agent 工具。"
+    "description": "单包双 row：Orca 风格 Git 工作树侧边栏（点分支直接对话、会话归档/恢复、谱系嵌套、Agent 工具）+ Git 审查面板（diff 审查、分块暂存提交、log/blame/compare、AI 提交信息、push）。"
   }
 }

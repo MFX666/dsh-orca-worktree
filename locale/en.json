@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Git worktrees",
-    "description": "Orca-style repository and worktree sidebar tree: click a branch to chat, expand multi-session lists, star branches, nest child worktrees, and manage via agent tools."
+    "description": "One package, two rows: an Orca-style git worktree sidebar (click a branch to chat, session archive/restore, nested lineage, agent tools) and a full git review panel (diff review, hunk staging, log/blame/compare, AI commit messages, push)."
   }
 }

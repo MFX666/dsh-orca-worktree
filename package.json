@@ -1,7 +1,7 @@
 {
   "name": "dsh-worktree-plugin",
-  "version": "0.4.1",
-  "description": "Git worktree management (Orca-style sidebar tree, list / create / enter / remove) + git review panel (diff review, staged/hunk commits, log/blame/compare, AI commit messages, push) for the deepseek-harness web UI — one package, two host rows",
+  "version": "0.4.2",
+  "description": "Orca-style git worktree sidebar (chat on a branch, session archive/restore, nested lineage) + a full git review panel (diff review, hunk staging, log/blame/compare, AI commit messages, push) — one package, two rows for the DSH web UI.",
   "type": "module",
   "license": "MIT",
   "main": "lib/index.js",

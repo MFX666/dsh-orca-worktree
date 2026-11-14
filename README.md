@@ -4,6 +4,10 @@ DeepSeek Harness 单包双 row 插件（dsh-superagent 模式）：**Git 工作�
 
 ![架构图](docs/structure.svg)
 
+| 工作树侧边栏 | Git 审查面板 |
+| --- | --- |
+| ![工作树侧边栏](docs/screen-worktree.png) | ![Git 审查面板](docs/screen-review.png) |
+
 ## Row 1：worktree-manager — Git 工作树侧边栏
 
 Orca 风格 Git Worktree 与对话侧边栏（`rWorktreeManager`）：
