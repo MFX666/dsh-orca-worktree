@@ -69,7 +69,6 @@ import type {
   WorktreeRepoGroup,
   WorktreeRow,
   WorktreeStatusValue,
-  WorktreeOpenValue,
 } from './protocol.ts'
 
 // Unified pool: every repo's worktrees live under ~/.dsh/dsh-orca-worktrees/<repo-key>/.
@@ -87,8 +86,6 @@ function poolRoot(): string {
 const REGISTRY_FILE = 'worktree-manager.json'
 const REGISTRY_VERSION = 2
 const COMMAND_TIMEOUT_MS = 120_000
-/** External editors fork quickly; a hung launch should fail fast, not stall the menu toast. */
-const OPEN_TIMEOUT_MS = 10_000
 const REMOVE_TIMEOUT_MS = 600_000
 const COMMAND_GRACE_MS = 5_000
 const MAX_OUTPUT_BYTES = 1 << 20
@@ -516,36 +513,6 @@ export default class WorktreeManagerService extends TypertRemoteService {
     try {
       const value = await this.statusInternal({ mode: 'danger-full-access' }, path, signal)
       return ok(value)
-    } catch (error) {
-      return fail(error)
-    }
-  }
-
-  /** Open a checkout directory in an external editor (VS Code or IntelliJ IDEA). */
-  @Remote('openInEditor')
-  async openInEditor(
-    editor: string,
-    path: string,
-    signal?: AbortSignal,
-  ): Promise<WorktreeEnvelope<WorktreeOpenValue>> {
-    try {
-      const kind: 'vscode' | 'idea' = editor === 'idea' ? 'idea' : 'vscode'
-      if ((await this.fs().lstat(path, undefined, signal)) === undefined) {
-        throw new WorktreeError('WORKTREE_NOT_FOUND', `no such directory: ${path}`)
-      }
-      const platform = (globalThis as { process?: { platform?: string } }).process?.platform
-      const candidates = editorLaunchArgv(kind, platform, path)
-      let lastError: unknown
-      for (const argv of candidates) {
-        try {
-          // cwd=path anchors relative launches; `open` exits immediately, CLI wrappers detach.
-          await this.runArgv({ mode: 'danger-full-access' }, path, argv, OPEN_TIMEOUT_MS, signal)
-          return ok({ path, editor: kind })
-        } catch (error) {
-          lastError = error
-        }
-      }
-      throw lastError
     } catch (error) {
       return fail(error)
     }

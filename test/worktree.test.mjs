@@ -187,7 +187,6 @@ test('WorktreeManagerService end-to-end: SRC descriptors, multi-repo overview, l
       'branches',
       'create',
       'ensureWorkspace',
-      'openInEditor',
       'overview',
       'remove',
       'setPinned',

@@ -29,9 +29,11 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 interface MenuAction {
   id: string
   label: string
-  icon?: { key: string }
+  icon?: { key: string; src?: string }
   danger?: boolean
+  disabled?: boolean
   separatorBefore?: boolean
+  children?: readonly MenuAction[]
   run?: () => unknown
 }
 
@@ -209,24 +211,41 @@ export function apply(ctx: ClientContext): void {
     slots.inject('contextMenu.icon', () => slots.register({ name: 'contextMenu.icon', key }, icon))
   }
 
+  // Reuse the native open-in-app catalog (`dsh-host-open-in-app` routes) so the
+  // worktree menu gets the same localized, installed-app submenu as sessions.
+  // Warm the apps fetch once per page; menu resolution must not wait on a cold request.
+  const tApp = ctx.locale.bind('open-in-app')
+  const openInApps: Promise<string[]> = fetch('open-in-app/apps', { headers: { accept: 'application/json' } })
+    .then(res => (res.ok ? res.json() : { apps: [] }))
+    .then((payload: { apps?: unknown }) =>
+      Array.isArray(payload.apps) ? payload.apps.filter((id): id is string => typeof id === 'string') : [],
+    )
+    .catch(() => [])
+
   const registerMenu = (menus: ContextMenusFace): void => {
-    const openIn = (editor: 'vscode' | 'idea', p: string): void => {
-      api.openInEditor(editor, p).catch(error => {
-        menus.notify(t('notice.error', { message: error instanceof Error ? error.message : String(error) }))
+    const openInAppAction = (p: string): Promise<MenuAction | undefined> =>
+      openInApps.then(apps => {
+        if (apps.length === 0) return undefined
+        return {
+          id: 'openInApp',
+          label: tApp('menu.openIn'),
+          icon: { key: 'open-in-app.application' },
+          children: apps.map(id => ({
+            id: `openInApp:${id}`,
+            label: tApp(`app.${id}`),
+            icon: { key: 'open-in-app.application', src: `open-in-app/icon/${id}` },
+            run: () => {
+              void fetch('open-in-app/open', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ app: id, path: p }),
+              }).then(res => {
+                if (!res.ok) menus.notify(t('notice.error', { message: `HTTP ${res.status}` }))
+              })
+            },
+          })),
+        }
       })
-    }
-    const editorActions = (p: string): readonly MenuAction[] => [
-      {
-        id: 'openVscode',
-        label: t('menu.openVscode'),
-        run: () => { openIn('vscode', p) },
-      },
-      {
-        id: 'openIdea',
-        label: t('menu.openIdea'),
-        run: () => { openIn('idea', p) },
-      },
-    ]
     const buildActions = async (
       {
         workspaceId,
@@ -259,6 +278,7 @@ export function apply(ctx: ClientContext): void {
       const missingSet = new Set((data?.missingPaths ?? []).map(p => (p.length > 1 ? p.replace(/\/+$/, '') : p)))
       const isMissing = missingSet.has(norm)
       const actions: MenuAction[] = []
+      const openAction = await openInAppAction(path)
 
       if (matchedRow !== undefined && matchedRepoRoot !== undefined) {
         const row = matchedRow
@@ -312,7 +332,7 @@ export function apply(ctx: ClientContext): void {
                 window.dispatchEvent(new CustomEvent('dsh-worktree:refresh'))
               }),
           },
-          ...editorActions(row.path),
+          ...(openAction === undefined ? [] : [openAction]),
           {
             id: 'copyPath',
             label: t('menu.copyPath'),
@@ -367,7 +387,7 @@ export function apply(ctx: ClientContext): void {
               menus.notify(t('notice.copied'), true)
             }),
         })
-        if (!isMissing) actions.push(...editorActions(path))
+        if (!isMissing && openAction !== undefined) actions.push(openAction)
       }
 
       // Workspace-level Rename / Remove (replaces stock WorkspaceDialogs which are unmounted when OrcaSidebar is active).
