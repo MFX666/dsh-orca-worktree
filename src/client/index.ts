@@ -210,6 +210,23 @@ export function apply(ctx: ClientContext): void {
   }
 
   const registerMenu = (menus: ContextMenusFace): void => {
+    const openIn = (editor: 'vscode' | 'idea', p: string): void => {
+      api.openInEditor(editor, p).catch(error => {
+        menus.notify(t('notice.error', { message: error instanceof Error ? error.message : String(error) }))
+      })
+    }
+    const editorActions = (p: string): readonly MenuAction[] => [
+      {
+        id: 'openVscode',
+        label: t('menu.openVscode'),
+        run: () => { openIn('vscode', p) },
+      },
+      {
+        id: 'openIdea',
+        label: t('menu.openIdea'),
+        run: () => { openIn('idea', p) },
+      },
+    ]
     const buildActions = async (
       {
         workspaceId,
@@ -295,6 +312,7 @@ export function apply(ctx: ClientContext): void {
                 window.dispatchEvent(new CustomEvent('dsh-worktree:refresh'))
               }),
           },
+          ...editorActions(row.path),
           {
             id: 'copyPath',
             label: t('menu.copyPath'),
@@ -349,6 +367,7 @@ export function apply(ctx: ClientContext): void {
               menus.notify(t('notice.copied'), true)
             }),
         })
+        if (!isMissing) actions.push(...editorActions(path))
       }
 
       // Workspace-level Rename / Remove (replaces stock WorkspaceDialogs which are unmounted when OrcaSidebar is active).

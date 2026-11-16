@@ -10,6 +10,7 @@ import type {
   WorktreeCreateValue,
   WorktreeEnsureWorkspaceValue,
   WorktreeEnvelope,
+  WorktreeOpenValue,
   WorktreeOverviewValue,
   WorktreePinValue,
   WorktreeRemoveValue,
@@ -28,6 +29,7 @@ export interface WorktreeApi {
   setPinned(path: string, pinned: boolean, signal?: AbortSignal): Promise<WorktreePinValue>
   remove(path: string, force: boolean, deleteRemote?: boolean, signal?: AbortSignal): Promise<WorktreeRemoveValue>
   status(path: string, signal?: AbortSignal): Promise<WorktreeStatusValue>
+  openInEditor(editor: 'vscode' | 'idea', path: string, signal?: AbortSignal): Promise<WorktreeOpenValue>
 }
 
 const NAMESPACE = 'rWorktreeManager'
@@ -67,5 +69,6 @@ export function createWorktreeApi(ctx: ClientContext): WorktreeApi {
     setPinned: (path, pinned, signal) => call('setPinned', { path, pinned }, signal),
     remove: (path, force, deleteRemote, signal) => call('remove', { path, force, deleteRemote }, signal),
     status: (path, signal) => call('status', { path }, signal),
+    openInEditor: (editor, path, signal) => call('openInEditor', { editor, path }, signal),
   }
 }

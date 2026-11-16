@@ -147,3 +147,9 @@ export interface WorktreeArchivedMetaValue {
 export interface WorktreeEnterValue {
   readonly path: string
 }
+
+/** `openInEditor` outcome — the editor app launched for this checkout. */
+export interface WorktreeOpenValue {
+  readonly path: string
+  readonly editor: 'vscode' | 'idea'
+}
