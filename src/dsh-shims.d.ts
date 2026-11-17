@@ -1,3 +1,11 @@
+declare module 'node:url' {
+  export function fileURLToPath(url: string | URL): string
+}
+
+declare module 'node:path' {
+  export function dirname(path: string): string
+}
+
 declare module '@deepseek-ai/cordis' {
   export interface Context {
     fs: {

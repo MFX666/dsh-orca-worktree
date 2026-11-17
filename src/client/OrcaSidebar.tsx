@@ -10,7 +10,7 @@
  * 3. Ungrouped Sessions (`▾ 未分组对话`)
  * @module dsh-worktree-plugin/client/OrcaSidebar
  */
-import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent, type ReactElement } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type MouseEvent, type ReactElement } from 'react'
 import { createPortal } from 'react-dom'
 import type {
   WorktreeBranchesValue,
@@ -19,6 +19,8 @@ import type {
   WorktreeRow,
 } from '../protocol.ts'
 import type { WorktreeApi } from './api.ts'
+import type { ProductSnapshot } from '../product-protocol.ts'
+import { ProductDialog } from './ProductDialog.tsx'
 import {
   IconChevron,
   IconClose,
@@ -85,8 +87,9 @@ export interface OrcaSidebarProps {
   /** Injected plugin callbacks from `client/index.ts`. */
   api: WorktreeApi
   openSession: (sessionId: string) => void
-  startSession: (workspaceId?: string) => void
-  pickAndAddWorkspace: () => Promise<void>
+  startSession: (workspaceId?: string, productId?: string) => Promise<void>
+  selectProduct: (productId?: string) => void
+  pickAndAddWorkspace: (productId?: string) => Promise<void>
   renameWorkspace?: (workspaceId: string, title: string) => Promise<unknown>
   deleteWorkspace?: (workspaceId: string) => Promise<void>
   openWorkspaceMenu: (workspaceId: string | undefined, path: string, title: string, point: { x: number; y: number }) => void
@@ -209,6 +212,21 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
   const panelActive = props.usePanelInfo !== undefined ? props.usePanelInfo(i => i.activePanelId !== null) : false
 
   const [overview, setOverview] = useState<WorktreeOverviewValue | null>(null)
+  const [products, setProducts] = useState<ProductSnapshot>({ products: [], sessionProducts: {} })
+  const [productId, setProductId] = useState<string | undefined>()
+  useEffect(() => { props.selectProduct(productId) }, [productId, props.selectProduct])
+  const [productDialog, setProductDialog] = useState<'new' | 'edit' | null>(null)
+  const [productError, setProductError] = useState('')
+  const draggedWorkspacePath = useRef<string | null>(null)
+  const [draggingWorkspace, setDraggingWorkspace] = useState(false)
+  const [productsExpanded, setProductsExpanded] = useState(false)
+  const [productsOverflow, setProductsOverflow] = useState(false)
+  const productTabsRef = useRef<HTMLDivElement | null>(null)
+  const showAllProducts = productsExpanded || draggingWorkspace
+  const [dropProductId, setDropProductId] = useState<string | undefined>()
+  const [dropFeedback, setDropFeedback] = useState<{ path: string; productId: string } | null>(null)
+  const [confirmDeleteProductId, setConfirmDeleteProductId] = useState<string | undefined>(undefined)
+  const selectedProduct = products.products.find(product => product.id === productId)
   const [query, setQuery] = useState('')
   const normalizedQuery = query.trim().toLowerCase()
   const [nowMs, setNowMs] = useState(() => Date.now())
@@ -235,7 +253,7 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
   // `uiWorkspace.startSession` silently no-ops (`console.warn`) when the client
   // workspaces store has not yet received a just-created workspace, so queue the
   // start until the store lists the workspace (give up after 10s).
-  const [pendingStartWsId, setPendingStartWsId] = useState<string | null>(null)
+  const [pendingStart, setPendingStart] = useState<{ workspaceId: string; productId?: string } | null>(null)
   const workspaceIdSetRef = useRef<ReadonlySet<string>>(new Set())
   workspaceIdSetRef.current = useMemo(
     () => new Set(workspaceSnap.items.map(item => item.workspaceId)),
@@ -246,28 +264,31 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
 
   const startSessionWhenReady = useCallback((workspaceId: string | undefined) => {
     if (workspaceId === undefined) return
-    if (workspaceIdSetRef.current.has(workspaceId)) {
-      startSessionRef.current(workspaceId)
-      return
-    }
-    setPendingStartWsId(workspaceId)
-  }, [])
+    setPendingStart({ workspaceId, productId })
+  }, [productId])
 
   useEffect(() => {
-    if (pendingStartWsId === null) return
+    if (pendingStart === null) return
     const requestedAt = Date.now()
+    const start = () => {
+      setPendingStart(null)
+      void startSessionRef.current(pendingStart.workspaceId, pendingStart.productId).catch(error => {
+        setToast({ kind: 'error', text: error instanceof Error ? error.message : String(error) })
+      })
+    }
+    if (workspaceIdSetRef.current.has(pendingStart.workspaceId)) { start(); return }
     const timer = window.setInterval(() => {
-      if (workspaceIdSetRef.current.has(pendingStartWsId)) {
+      if (workspaceIdSetRef.current.has(pendingStart.workspaceId)) {
         window.clearInterval(timer)
-        setPendingStartWsId(null)
-        startSessionRef.current(pendingStartWsId)
+        start()
       } else if (Date.now() - requestedAt > 10_000) {
         window.clearInterval(timer)
-        setPendingStartWsId(null)
+        setPendingStart(null)
+        setToast({ kind: 'error', text: t('product.workspaceTimeout') })
       }
     }, 200)
     return () => { window.clearInterval(timer) }
-  }, [pendingStartWsId])
+  }, [pendingStart, t])
 
   const rootRef = useRef<HTMLDivElement | null>(null)
   const searchInputRef = useRef<HTMLInputElement | null>(null)
@@ -287,6 +308,12 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
     const timer = window.setTimeout(() => { setToast(null) }, 3500)
     return () => { window.clearTimeout(timer) }
   }, [toast])
+
+  useEffect(() => {
+    if (dropFeedback === null) return
+    const timer = window.setTimeout(() => { setDropFeedback(null) }, 3500)
+    return () => { window.clearTimeout(timer) }
+  }, [dropFeedback])
 
   // Keep relative timestamps fresh once per minute.
   useEffect(() => {
@@ -328,6 +355,102 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
       controller.abort()
     }
   }, [refreshOverview, workspaceSignature])
+
+  const refreshProducts = useCallback(async (signal?: AbortSignal) => {
+    try {
+      const next = await api.products(signal)
+      if (signal?.aborted) return
+      setProducts(next)
+      setProductError('')
+      setProductId(current => next.products.some(product => product.id === current) ? current : undefined)
+    } catch (error) {
+      if (!signal?.aborted) setProductError(error instanceof Error ? error.message : String(error))
+    }
+  }, [api])
+
+  useEffect(() => {
+    const controller = new AbortController()
+    const refresh = () => { void refreshProducts(controller.signal) }
+    refresh()
+    const timer = window.setInterval(refresh, 12_000)
+    window.addEventListener('dsh-worktree:products-changed', refresh)
+    return () => {
+      controller.abort()
+      window.clearInterval(timer)
+      window.removeEventListener('dsh-worktree:products-changed', refresh)
+    }
+  }, [refreshProducts])
+
+  useEffect(() => {
+    const tabs = productTabsRef.current
+    if (!tabs) return
+    const measure = () => { setProductsOverflow(tabs.scrollHeight > 66) }
+    measure()
+    const observer = new ResizeObserver(measure)
+    observer.observe(tabs)
+    return () => { observer.disconnect() }
+  }, [products.products, showAllProducts, wide])
+
+  const workspaceMembership = (paths: readonly string[]) => productId === undefined
+    ? products.products
+      .filter(product => product.projects.some(project => paths.some(path => normalizePath(project.path) === normalizePath(path))))
+      .map(product => product.name)
+    : []
+
+  const startWorkspaceDrag = (event: DragEvent<HTMLElement>, path: string) => {
+    event.stopPropagation()
+    event.dataTransfer.effectAllowed = 'copy'
+    event.dataTransfer.setData('application/x-dsh-workspace-path', path)
+    draggedWorkspacePath.current = path
+    setDraggingWorkspace(true)
+  }
+
+  const endWorkspaceDrag = () => {
+    draggedWorkspacePath.current = null
+    setDraggingWorkspace(false)
+    setDropProductId(undefined)
+  }
+
+  const dragWorkspaceOverProduct = (event: DragEvent<HTMLElement>, targetProductId: string) => {
+    if (!draggedWorkspacePath.current) return
+    event.preventDefault()
+    event.dataTransfer.dropEffect = 'copy'
+    setDropProductId(targetProductId)
+  }
+
+  const dropWorkspaceOnProduct = async (event: DragEvent<HTMLElement>, targetProductId: string) => {
+    const path = draggedWorkspacePath.current
+    if (!path) return
+    event.preventDefault()
+    event.stopPropagation()
+    endWorkspaceDrag()
+    try {
+      const product = await api.addProductWorkspace(targetProductId, path)
+      await refreshProducts()
+      if (product.added !== false) setDropFeedback({ path, productId: targetProductId })
+      showToast('info', t(product.added === false ? 'product.workspaceExists' : 'product.workspaceAdded', { name: product.name }))
+    } catch (error) {
+      showToast('error', error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  // Two-step inline confirm: first click arms, second click unlinks (same semantics as dialog remove).
+  const deleteProductChip = async (targetProductId: string) => {
+    if (confirmDeleteProductId !== targetProductId) {
+      setConfirmDeleteProductId(targetProductId)
+      return
+    }
+    setConfirmDeleteProductId(undefined)
+    const name = products.products.find(product => product.id === targetProductId)?.name
+    try {
+      await api.removeProduct(targetProductId)
+      if (productId === targetProductId) setProductId(undefined)
+      await refreshProducts()
+      if (name !== undefined) showToast('info', t('product.deleted', { name }))
+    } catch (error) {
+      showToast('error', error instanceof Error ? error.message : String(error))
+    }
+  }
 
   // Load remote & local branches whenever Create Worktree dialog opens.
   useEffect(() => {
@@ -809,9 +932,12 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
         <button
           type="button"
           className="owt-icon-btn"
-          aria-label={t('header.addRepo')}
-          title={t('header.addRepo')}
-          onClick={() => { void props.pickAndAddWorkspace() }}
+          aria-label={t(productId === undefined ? 'header.addRepo' : 'product.addWorkspace')}
+          title={t(productId === undefined ? 'header.addRepo' : 'product.addWorkspace')}
+          onClick={() => {
+            props.expandSidebar?.()
+            void props.pickAndAddWorkspace(productId).catch(error => { showToast('error', error instanceof Error ? error.message : String(error)) })
+          }}
         >
           <IconPlus size={15} />
         </button>
@@ -820,6 +946,7 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
   }
 
   const renderRepo = (repo: WorktreeRepoGroup): ReactElement | null => {
+    const membership = workspaceMembership([repo.repositoryRoot, ...repo.rows.map(row => row.path)])
     const byPath = new Map<string, WorktreeRow>()
     for (const row of repo.rows) byPath.set(normalizePath(row.path), row)
 
@@ -1093,6 +1220,7 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
             }
           }}
           data-has-active={repoContainsActive ? 'true' : 'false'}
+          data-drop-complete={dropFeedback?.path === repo.repositoryRoot ? 'true' : undefined}
           title={repo.repositoryRoot}
           onClick={() => { toggleSetItem(setCollapsedRepos, STORAGE_COLLAPSED_REPOS, repo.repositoryRoot) }}
           onContextMenu={event => {
@@ -1106,7 +1234,12 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
           <span className="owt-repo-chevron">
             <IconChevron open={!repoCollapsed} size={12} />
           </span>
-          <span className="owt-repo-name">{repo.name}</span>
+          <span className="owt-repo-name" draggable title={`${repo.repositoryRoot}\n${t('product.dragHint')}`}
+            onDragStart={event => { startWorkspaceDrag(event, repo.repositoryRoot) }} onDragEnd={endWorkspaceDrag}>{repo.name}</span>
+          {membership.length > 0 && <span className="owt-workspace-groups" title={t('product.memberships', { names: membership.join('、') })}>
+            <span className="owt-membership-name">{membership[0]}</span>
+            {membership.length > 1 && <span className="owt-membership-count">+{membership.length - 1}</span>}
+          </span>}
           <span className="owt-repo-count">{repo.rows.length}</span>
           <span className="owt-hover-actions" onClick={event => { event.stopPropagation() }}>
             <button
@@ -1169,8 +1302,13 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
       if (!detail?.row) return
       void startNewChatInWorktree(detail.row)
     }
+    const onRequestFolderChat = (event: Event) => {
+      const detail = (event as CustomEvent<{ workspaceId: string }>).detail
+      if (detail?.workspaceId) startSessionWhenReady(detail.workspaceId)
+    }
     const onRequestRefresh = () => {
       void refreshOverview(true)
+      void refreshProducts()
     }
     const onRequestWsRename = (event: Event) => {
       const detail = (event as CustomEvent<WsRenameDialogState>).detail
@@ -1186,6 +1324,7 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
     window.addEventListener('dsh-worktree:open-create', onRequestCreate)
     window.addEventListener('dsh-worktree:open-remove', onRequestRemove)
     window.addEventListener('dsh-worktree:new-chat', onRequestNewChat)
+    window.addEventListener('dsh-worktree:new-folder-chat', onRequestFolderChat)
     window.addEventListener('dsh-worktree:refresh', onRequestRefresh)
     window.addEventListener('dsh-worktree:open-ws-rename', onRequestWsRename)
     window.addEventListener('dsh-worktree:open-ws-delete', onRequestWsDelete)
@@ -1193,16 +1332,21 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
       window.removeEventListener('dsh-worktree:open-create', onRequestCreate)
       window.removeEventListener('dsh-worktree:open-remove', onRequestRemove)
       window.removeEventListener('dsh-worktree:new-chat', onRequestNewChat)
+      window.removeEventListener('dsh-worktree:new-folder-chat', onRequestFolderChat)
       window.removeEventListener('dsh-worktree:refresh', onRequestRefresh)
       window.removeEventListener('dsh-worktree:open-ws-rename', onRequestWsRename)
       window.removeEventListener('dsh-worktree:open-ws-delete', onRequestWsDelete)
     }
-  }, [refreshOverview, startNewChatInWorktree])
+  }, [refreshOverview, refreshProducts, startNewChatInWorktree, startSessionWhenReady])
 
 
-  const renderedRepos = (overview?.repos ?? []).map(renderRepo).filter((node): node is ReactElement => node !== null)
+  const productPaths = new Set(selectedProduct?.projects.map(project => normalizePath(project.path)) ?? [])
+  const renderedRepos = (overview?.repos ?? [])
+    .filter(repo => productId === undefined || productPaths.has(normalizePath(repo.repositoryRoot)) || repo.rows.some(row => productPaths.has(normalizePath(row.path))))
+    .map(renderRepo).filter((node): node is ReactElement => node !== null)
 
   const filteredNonGit = nonGitWorkspaces.filter(ws => {
+    if (productId !== undefined && !productPaths.has(normalizePath(ws.path))) return false
     if (normalizedQuery === '') return true
     if (ws.title.toLowerCase().includes(normalizedQuery)) return true
     const chats = sessionsByPath.get(normalizePath(ws.path)) ?? []
@@ -1210,7 +1354,8 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
   })
 
   const filteredUngrouped = ungroupedSessions.filter(
-    s => normalizedQuery === '' || sessionLabel(s, t).toLowerCase().includes(normalizedQuery),
+    s => (productId === undefined || products.sessionProducts[s.id] === productId) &&
+      (normalizedQuery === '' || sessionLabel(s, t).toLowerCase().includes(normalizedQuery)),
   )
 
   const ungroupedCollapsed = normalizedQuery === '' && collapsedRepos.has('ungrouped')
@@ -1269,13 +1414,93 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
         <button
           type="button"
           className="owt-add-btn"
-          title={t('header.addRepo')}
-          aria-label={t('header.addRepo')}
-          onClick={() => { void props.pickAndAddWorkspace() }}
+          title={t(productId === undefined ? 'header.addRepo' : 'product.addWorkspace')}
+          aria-label={t(productId === undefined ? 'header.addRepo' : 'product.addWorkspace')}
+          onClick={() => {
+            void props.pickAndAddWorkspace(productId).catch(error => { showToast('error', error instanceof Error ? error.message : String(error)) })
+          }}
         >
           <IconPlus size={14} />
         </button>
       </div>
+      <div className="owt-product-bar">
+        <div ref={productTabsRef} className="owt-product-tabs" role="tablist" aria-label={t('product.workspaces')}
+          data-expanded={showAllProducts ? 'true' : undefined}
+          onFocusCapture={event => {
+            if (!showAllProducts && (event.target as HTMLElement).offsetTop >= 66) setProductsExpanded(true)
+          }}
+          onKeyDown={event => {
+            if (event.key === 'Escape') {
+              setConfirmDeleteProductId(undefined)
+              return
+            }
+            if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
+            if (productsOverflow) setProductsExpanded(true)
+            const tabs = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('[role="tab"]'))
+            const index = tabs.indexOf(document.activeElement as HTMLElement)
+            const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : (index + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length
+            event.preventDefault()
+            tabs[next]?.focus()
+            tabs[next]?.click()
+          }}>
+          <button type="button" role="tab" aria-selected={productId === undefined} tabIndex={productId === undefined ? 0 : -1} onClick={() => { setProductId(undefined) }}>{t('product.all')}</button>
+          {products.products.map(product => (
+            <div key={product.id} role="tab" aria-selected={product.id === productId}
+              tabIndex={product.id === productId ? 0 : -1} title={product.error ?? `${product.manifestPath}\n${t('product.dropHint')}`}
+              data-drop-target={dropProductId === product.id ? 'true' : undefined}
+              data-drop-complete={dropFeedback?.productId === product.id ? 'true' : undefined}
+              data-confirm={confirmDeleteProductId === product.id ? 'true' : undefined}
+              onDragOver={event => { dragWorkspaceOverProduct(event, product.id) }}
+              onDragLeave={event => {
+                if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropProductId(current => current === product.id ? undefined : current)
+              }}
+              onDrop={event => { void dropWorkspaceOnProduct(event, product.id) }}
+              onClick={() => { if (confirmDeleteProductId === product.id) setConfirmDeleteProductId(undefined); setProductId(product.id) }}
+              onKeyDown={event => {
+                if ((event.key === 'Enter' || event.key === ' ') && event.target === event.currentTarget) {
+                  event.preventDefault()
+                  if (confirmDeleteProductId === product.id) setConfirmDeleteProductId(undefined)
+                  setProductId(product.id)
+                }
+              }}>
+              {dropFeedback?.productId === product.id && <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><path d="m3 8 3 3 7-7" /></svg>}
+              <span className="owt-product-name">{product.error ? '⚠ ' : ''}{product.name}</span>
+              <span className="owt-product-count" aria-label={t('product.workspaceCount', { count: product.projects.length })}>{product.projects.length}</span>
+              <span role="button" tabIndex={0} className="owt-product-delete"
+                title={t(confirmDeleteProductId === product.id ? 'product.deleteConfirm' : 'product.delete')}
+                aria-label={t(confirmDeleteProductId === product.id ? 'product.deleteConfirm' : 'product.delete')}
+                onClick={event => { event.stopPropagation(); void deleteProductChip(product.id) }}
+                onKeyDown={event => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault()
+                    event.stopPropagation()
+                    void deleteProductChip(product.id)
+                  }
+                }}
+              >×</span>
+            </div>
+          ))}
+        </div>
+        {productsOverflow && <button type="button" className="owt-product-more" aria-expanded={showAllProducts}
+          onClick={() => { setProductsExpanded(current => !current) }}>{t(showAllProducts ? 'product.less' : 'product.more')}<IconChevron open={showAllProducts} size={10} /></button>}
+        <button type="button" className="owt-add-btn" title={t('product.add')} aria-label={t('product.add')} onClick={() => { setProductDialog('new') }}><IconPlus size={14} /></button>
+        {selectedProduct && <button type="button" className="owt-add-btn" title={t('product.edit')} aria-label={t('product.edit')} onClick={() => { setProductDialog('edit') }}><IconDots size={14} /></button>}
+      </div>
+      {(productError || selectedProduct?.error) && <div className="owt-toast" data-kind="error" role="alert">{productError || selectedProduct?.error}</div>}
+      {productDialog !== null && <ProductDialog
+        key={productDialog === 'edit' ? productId : 'new'} api={api} t={t}
+        product={productDialog === 'edit' ? selectedProduct : undefined}
+        onClose={() => { setProductDialog(null) }}
+        onSaved={product => {
+          setProductDialog(null)
+          setProducts(current => ({ ...current, products: [...current.products.filter(item => item.id !== product.id), product] }))
+          setProductId(product.id)
+          void refreshProducts()
+          void refreshOverview()
+        }}
+        onRemoved={() => { setProductDialog(null); setProductId(undefined); void refreshProducts() }}
+      />}
+
 
       {toast !== null && (
         <div className="owt-toast" data-kind={toast.kind} role="status">
@@ -1293,6 +1518,7 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
           const collapsed = normalizedQuery === '' && collapsedRepos.has(norm)
           const chats = sessionsByPath.get(norm) ?? []
           const folderHasActive = chats.some(c => c.id === activeSessionId)
+          const membership = workspaceMembership([ws.path])
           const chatPreview = previewChats(chats, `ws:${norm}`)
           const chatsExpanded = expandedChatLists.has(`ws:${norm}`)
           return (
@@ -1311,6 +1537,7 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
                 }}
                 data-missing={isMissing ? 'true' : 'false'}
                 data-has-active={folderHasActive ? 'true' : 'false'}
+                data-drop-complete={dropFeedback?.path === ws.path ? 'true' : undefined}
                 title={isMissing ? t('dialog.wsDelete.missingHint', { path: ws.path }) : ws.path}
                 onClick={() => { toggleSetItem(setCollapsedRepos, STORAGE_COLLAPSED_REPOS, norm) }}
                 onContextMenu={event => {
@@ -1324,7 +1551,12 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
                 <span className="owt-repo-chevron">
                   <IconChevron open={!collapsed} size={12} />
                 </span>
-                <span className="owt-repo-name">{ws.title}</span>
+                <span className="owt-repo-name" draggable={!isMissing} title={isMissing ? ws.path : `${ws.path}\n${t('product.dragHint')}`}
+                  onDragStart={event => { startWorkspaceDrag(event, ws.path) }} onDragEnd={endWorkspaceDrag}>{ws.title}</span>
+                {membership.length > 0 && <span className="owt-workspace-groups" title={t('product.memberships', { names: membership.join('、') })}>
+            <span className="owt-membership-name">{membership[0]}</span>
+            {membership.length > 1 && <span className="owt-membership-count">+{membership.length - 1}</span>}
+          </span>}
                 {isMissing ? (
                   <span className="owt-missing-pill">{t('wt.missingBadge')}</span>
                 ) : (
@@ -1349,7 +1581,7 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
                       type="button"
                       className="owt-icon-btn"
                       title={t('wt.newChat')}
-                      onClick={() => { props.startSession(ws.workspaceId) }}
+                      onClick={() => { startSessionWhenReady(ws.workspaceId) }}
                     >
                       <IconPlus size={13.5} />
                     </button>
@@ -1482,7 +1714,7 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
 
         {nothingShown && (
           <div className="owt-empty">
-            {normalizedQuery !== '' ? t('empty.search') : t('empty.repos')}
+            {t(normalizedQuery !== '' ? 'empty.search' : selectedProduct?.projects.length === 0 ? 'product.empty' : 'empty.repos')}
           </div>
         )}
       </div>

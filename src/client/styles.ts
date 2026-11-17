@@ -44,6 +44,30 @@ const CSS = `
   padding: 6px 0;
 }
 
+.owt-product-bar { display: flex; align-items: flex-end; gap: 6px; padding: 2px 6px 10px; flex: none; min-width: 0; }
+.owt-product-tabs { position: relative; display: flex; flex-wrap: wrap; align-content: flex-start; flex: 1; min-width: 0; max-height: 66px; overflow: hidden; gap: 6px; }
+.owt-product-tabs[data-expanded="true"] { max-height: min(30vh, 220px); overflow-y: auto; }
+.owt-product-tabs button, .owt-product-tabs [role="tab"], .owt-product-more { display: inline-flex; align-items: center; gap: 6px; flex: none; box-sizing: border-box; height: 30px; max-width: min(160px, 100%); min-width: 0; white-space: nowrap; border: 0; border-radius: 8px; padding: 5px 9px; background: var(--owt-hover-bg); color: var(--dsw-alias-label-secondary); font: inherit; font-size: 12px; cursor: pointer; }
+.owt-product-more { max-width: none; }
+.owt-product-bar > .owt-add-btn { align-self: flex-start; }
+.owt-product-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.owt-product-count { flex: none; font-size: 11px; font-variant-numeric: tabular-nums; color: var(--owt-muted); }
+.owt-product-tabs button:hover, .owt-product-tabs [role="tab"]:hover { background: var(--owt-hover-bg); }
+.owt-product-tabs button[aria-selected="true"], .owt-product-tabs [role="tab"][aria-selected="true"] { background: var(--owt-active-bg); color: var(--dsw-alias-brand-primary); }
+.owt-product-tabs [role="tab"][data-confirm="true"] { background: var(--owt-active-bg); color: var(--dsw-alias-state-error-primary); outline: 1px solid var(--dsw-alias-state-error-primary); outline-offset: -1px; }
+.owt-product-delete { display: none; flex: none; box-sizing: border-box; width: 14px; height: 14px; align-items: center; justify-content: center; border-radius: 4px; font-size: 12px; line-height: 1; color: var(--dsw-alias-label-secondary); cursor: pointer; }
+.owt-product-tabs [role="tab"]:hover .owt-product-delete, .owt-product-delete:focus-visible, [data-confirm="true"] .owt-product-delete { display: inline-flex; }
+.owt-product-delete:hover { color: var(--dsw-alias-state-error-primary); background: var(--owt-hover-bg); }
+.owt-product-tabs button:focus-visible, .owt-product-bar button:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: -2px; }
+.owt-product-tabs [role="tab"]:focus-visible, .owt-product-delete:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: -2px; }
+.owt-product-tabs button[data-drop-target="true"], .owt-product-tabs [role="tab"][data-drop-target="true"] { background: var(--owt-active-bg); outline: 1px dashed var(--dsw-alias-brand-primary); outline-offset: -1px; }
+.owt-product-tabs button[data-drop-complete="true"], .owt-product-tabs [role="tab"][data-drop-complete="true"], .owt-repo-row[data-drop-complete="true"] { background: var(--owt-active-bg); }
+.owt-workspace-groups { display: inline-flex; align-items: center; gap: 4px; flex: 0 1 auto; min-width: 0; max-width: 35%; padding: 1px 5px; border-radius: 4px; white-space: nowrap; font-size: 11px; color: var(--owt-muted); background: var(--owt-hover-bg); }
+.owt-membership-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.owt-membership-count { flex: none; font-variant-numeric: tabular-nums; }
+.owt-repo-name[draggable="true"] { cursor: grab; }
+.owt-repo-name[draggable="true"]:active { cursor: grabbing; }
+
 /* VS Code-style flat filter input + "+" action */
 .owt-toolbar {
   display: flex;

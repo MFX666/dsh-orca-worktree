@@ -16,7 +16,15 @@ import type {
   WorktreeStatusValue,
 } from '../protocol.ts'
 
+import type { ProductSnapshot, ProductView, ProductWorkspaceAddValue } from '../product-protocol.ts'
+
 export interface WorktreeApi {
+  products(signal?: AbortSignal): Promise<ProductSnapshot>
+  createProduct(name: string): Promise<ProductView>
+  addProductWorkspace(productId: string, path: string): Promise<ProductWorkspaceAddValue>
+  saveProduct(manifestPath: string, text?: string, version?: string): Promise<ProductView>
+  removeProduct(productId: string): Promise<{ productId: string }>
+  bindProduct(sessionId: string, productId: string): Promise<{ sessionId: string; productId: string }>
   overview(includeDirty?: boolean, signal?: AbortSignal): Promise<WorktreeOverviewValue>
   archivedMeta(signal?: AbortSignal): Promise<WorktreeArchivedMetaValue>
   branches(repositoryRoot: string, refresh?: boolean, signal?: AbortSignal): Promise<WorktreeBranchesValue>
@@ -58,6 +66,12 @@ export function createWorktreeApi(ctx: ClientContext): WorktreeApi {
   }
 
   return {
+    products: signal => call('products', {}, signal),
+    createProduct: name => call('createProduct', { name }),
+    addProductWorkspace: (productId, path) => call('addProductWorkspace', { productId, path }),
+    saveProduct: (manifestPath, text, version) => call('saveProduct', { manifestPath, text, version }),
+    removeProduct: productId => call('removeProduct', { productId }),
+    bindProduct: (sessionId, productId) => call('bindProduct', { sessionId, productId }),
     overview: (includeDirty = false, signal) => call('overview', { includeDirty }, signal),
     archivedMeta: signal => call('archivedMeta', {}, signal),
     branches: (repositoryRoot, refresh = false, signal) => call('branches', { repositoryRoot, refresh }, signal),

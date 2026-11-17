@@ -14,9 +14,12 @@
  *   directly under each worktree directory.
  * @module dsh-worktree-plugin
  */
+import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import type {} from '@deepseek-ai/dsh-fs'
+import { Products } from './products.ts'
+import type { ProductSnapshot, ProductView, ProductWorkspaceAddValue } from './product-protocol.ts'
 
 function pathBasename(p: string): string {
   const trimmed = p.replace(/[/\\]+$/, '')
@@ -269,9 +272,42 @@ export default class WorktreeManagerService extends TypertRemoteService {
 
   private orcaLineageCache: { expiresAt: number; map: ReadonlyMap<string, string> } | null = null
 
+  private readonly productWorkspaces: Products
+
   constructor(ctx: Context) {
     super(ctx, 'rWorktreeManager')
+    this.productWorkspaces = new Products(ctx, fileURLToPath(new URL('../', import.meta.url)))
     this.registerTools()
+  }
+
+  @Remote('products')
+  products(): Promise<WorktreeEnvelope<ProductSnapshot>> {
+    return this.productWorkspaces.products()
+  }
+
+  @Remote('createProduct')
+  createProduct(name: string): Promise<WorktreeEnvelope<ProductView>> {
+    return this.productWorkspaces.createProduct(name)
+  }
+
+  @Remote('addProductWorkspace')
+  addProductWorkspace(productId: string, path: string): Promise<WorktreeEnvelope<ProductWorkspaceAddValue>> {
+    return this.productWorkspaces.addProductWorkspace(productId, path)
+  }
+
+  @Remote('saveProduct')
+  saveProduct(manifestPath: string, text?: string, version?: string): Promise<WorktreeEnvelope<ProductView>> {
+    return this.productWorkspaces.saveProduct(manifestPath, text, version)
+  }
+
+  @Remote('removeProduct')
+  removeProduct(productId: string): Promise<WorktreeEnvelope<{ productId: string }>> {
+    return this.productWorkspaces.removeProduct(productId)
+  }
+
+  @Remote('bindProduct')
+  bindProduct(sessionId: string, productId: string): Promise<WorktreeEnvelope<{ sessionId: string; productId: string }>> {
+    return this.productWorkspaces.bindProduct(sessionId, productId)
   }
 
   // ---------------------------------------------------------------------

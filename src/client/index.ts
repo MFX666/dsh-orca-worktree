@@ -18,7 +18,7 @@ import { applyGitReview } from './review/index.ts'
 import { injectStyles, removeStyles } from './styles.ts'
 import { en, NS, type WorktreeKey, zh } from './locales.ts'
 
-export const inject = ['slots', 'connection', 'locale', 'uiWorkspace', 'workspaces', 'contextMenus']
+export const inject = ['slots', 'connection', 'locale', 'uiWorkspace', 'workspaces', 'sessions', 'layout', 'contextMenus']
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
@@ -109,9 +109,31 @@ export function apply(ctx: ClientContext): void {
     return (ctx as unknown as { contextMenus?: ContextMenusFace }).contextMenus
   }
 
-  const pickAndAddWorkspace = async (): Promise<void> => {
+  const layout = (ctx as unknown as { layout: { beginNavigation(): AbortSignal } }).layout
+  let activeProductId: string | undefined
+  const selectProduct = (productId?: string): void => {
+    if (activeProductId === productId) return
+    activeProductId = productId
+    layout.beginNavigation()
+  }
+  const startSession = async (workspaceId?: string, productId?: string): Promise<void> => {
+    if (workspaceId === undefined) { uiWorkspace.startSession(); return }
+    const navigation = productId === activeProductId ? layout.beginNavigation() : undefined
+    const sessions = (ctx as unknown as { sessions: { create(input: { workspaceId: string }): Promise<string> } }).sessions
+    const sessionId = await sessions.create({ workspaceId })
+    if (productId !== undefined) await api.bindProduct(sessionId, productId)
+    window.dispatchEvent(new Event('dsh-worktree:products-changed'))
+    if (navigation && !navigation.aborted && productId === activeProductId) uiWorkspace.openSession(sessionId)
+  }
+
+  const pickAndAddWorkspace = async (productId?: string): Promise<void> => {
+    const navigation = productId === activeProductId ? layout.beginNavigation() : undefined
     const picked = await uiWorkspace.pickDirectory()
     if (picked === null) return
+    if (productId !== undefined) {
+      await api.addProductWorkspace(productId, picked)
+      window.dispatchEvent(new Event('dsh-worktree:products-changed'))
+    }
     const ws = await workspaces.create({ path: picked })
     // `uiWorkspace.startSession` silently no-ops ("unknown workspace" warning)
     // when the client workspaces store has not yet received the just-created
@@ -126,7 +148,7 @@ export function apply(ctx: ClientContext): void {
     for (let waited = 0; !listed() && waited < 10_000; waited += 200) {
       await new Promise(resolve => window.setTimeout(resolve, 200))
     }
-    uiWorkspace.startSession(ws.workspaceId)
+    if (navigation && !navigation.aborted && productId === activeProductId) await startSession(ws.workspaceId, productId)
   }
 
   // Override `sidebar.workspaces` at priority -1 (do NOT re-declare ui-workspace's child slots!).
@@ -139,7 +161,8 @@ export function apply(ctx: ClientContext): void {
         inject: () => ({
           api,
           openSession: (sessionId: string) => { uiWorkspace.openSession(sessionId) },
-          startSession: (workspaceId?: string) => { uiWorkspace.startSession(workspaceId) },
+          startSession,
+          selectProduct,
           pickAndAddWorkspace,
           renameWorkspace: (workspaceId: string, title: string) => workspaces.rename(workspaceId, title),
           deleteWorkspace: (workspaceId: string) => workspaces.delete(workspaceId),
@@ -374,7 +397,7 @@ export function apply(ctx: ClientContext): void {
             label: t('menu.newChat'),
             icon: { key: ICON_CREATE },
             run: () => {
-              uiWorkspace.startSession(workspaceId)
+              window.dispatchEvent(new CustomEvent('dsh-worktree:new-folder-chat', { detail: { workspaceId } }))
             },
           })
         }

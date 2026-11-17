@@ -2,7 +2,8 @@ import assert from 'node:assert/strict'
 import { execFileSync, spawn } from 'node:child_process'
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { remoteMethods } from '@deepseek-ai/dsh-typert-protocol'
@@ -150,6 +151,41 @@ function makeHostStubs(initialWorkspaces) {
   }
 }
 
+test('product Remote creates and updates manifests under the installed plugin with default workspace restrictions', async () => {
+  const pluginRoot = realpathSync(fileURLToPath(new URL('../', import.meta.url)))
+  const ctx = new Context()
+  const stubs = makeHostStubs([])
+  const files = new Map()
+  let state = { products: [], sessionProducts: {} }
+  let revision = 0
+  stubs.fsService.stat = async target => target.displayPath === pluginRoot
+    ? { type: 'directory', version: 'directory' }
+    : files.has(target.displayPath) ? { type: 'file', version: files.get(target.displayPath).version } : undefined
+  stubs.fsService.readText = async target => files.get(target.displayPath).text
+  stubs.fsService.writeText = async (target, text, expected, _signal, policy) => {
+    const effective = policy ?? { mode: 'workspace-write', workspaceRoot: join(pluginRoot, 'another-workspace') }
+    assert.equal(effective.mode, 'workspace-write')
+    assert.equal(dirname(target.displayPath), effective.workspaceRoot)
+    const existing = files.get(target.displayPath)
+    assert.ok(expected.kind === 'createIfAbsent' ? !existing : expected.version === existing?.version)
+    files.set(target.displayPath, { text, version: String(++revision) })
+  }
+  for (const [name, service] of Object.entries({ fs: stubs.fsService, subprocess: stubs.subprocessService,
+    workingDirectory: stubs.workingDirectory, workspaceRegistry: stubs.workspaceRegistry, tools: stubs.tools,
+    storageDomain: { async open() { return { global: { get: () => state, async set(next) { state = next } }, async close() {} } } },
+  })) ctx.provide(name, service)
+  ctx.plugin(WorktreeManagerService)
+  await new Promise(resolve => setTimeout(resolve, 20))
+  const service = ctx.get('rWorktreeManager')
+  const created = await service.createProduct('UI group')
+  assert.equal(created.ok, true, created.message)
+  assert.equal(dirname(created.value.manifestPath), pluginRoot)
+  assert.deepEqual(created.value.projects, [])
+  const added = await service.addProductWorkspace(created.value.id, pluginRoot)
+  assert.equal(added.ok, true, added.message)
+  assert.deepEqual(JSON.parse(files.get(created.value.manifestPath).text).projects, [{ name: basename(pluginRoot), path: pluginRoot }])
+})
+
 test('WorktreeManagerService end-to-end: SRC descriptors, multi-repo overview, lineage create, pin, workspace sync, safe remove', async () => {
   const tempRoot = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-orca-wt-test-')))
   // Unified pool must live outside the plugin install dir during tests.
@@ -183,12 +219,18 @@ test('WorktreeManagerService end-to-end: SRC descriptors, multi-repo overview, l
     const methods = remoteMethods(svc)
     const exportedNames = methods.map(m => m.exportName ?? m.method).sort()
     assert.deepEqual(exportedNames, [
+      'addProductWorkspace',
       'archivedMeta',
+      'bindProduct',
       'branches',
       'create',
+      'createProduct',
       'ensureWorkspace',
       'overview',
+      'products',
       'remove',
+      'removeProduct',
+      'saveProduct',
       'setPinned',
       'status',
     ])
@@ -419,7 +461,7 @@ test('WorktreeManagerService end-to-end: SRC descriptors, multi-repo overview, l
     assert.equal(finalOverview.value.repos[0].rows.length, 1)
 
     // 8. Verify Agent tools registered cleanly + central registry file in pool root.
-    assert.equal(stubs.registeredTools.size, 6)
+    assert.equal(stubs.registeredTools.size, 12)
     assert.equal(JSON.parse(readFileSync(join(process.env.DSH_WORKTREE_POOL, 'worktree-manager.json'), 'utf8')).version, 2)
   } finally {
     rmSync(tempRoot, { recursive: true, force: true })
