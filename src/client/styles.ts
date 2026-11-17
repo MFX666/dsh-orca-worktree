@@ -148,6 +148,12 @@ const CSS = `
   background: var(--owt-hover-bg);
 }
 
+.owt-repo-row:focus-visible,
+.owt-add-btn:focus-visible {
+  outline: 1px solid var(--dsw-alias-brand-primary);
+  outline-offset: 1px;
+}
+
 .owt-scroll {
   flex: 1;
   min-height: 0;
@@ -417,29 +423,24 @@ const CSS = `
   color: var(--owt-muted);
 }
 
-/* Minimal chat counter trigger */
-.owt-chat-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 2.5px;
-  height: 18px;
-  padding: 0 4px;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--owt-muted);
-  font: inherit;
-  font-variant-numeric: tabular-nums;
-  font-size: 11px;
-  line-height: 1;
-  cursor: pointer;
-  flex: none;
+.owt-chats-toggle {
+  width: 24px;
+  height: 24px;
 }
 
-.owt-chat-pill:hover,
-.owt-chat-pill[aria-expanded="true"] {
-  background: var(--owt-hover-bg);
-  color: var(--dsw-alias-label-primary);
+.owt-chats-toggle:focus-visible {
+  outline: 1px solid var(--dsw-alias-brand-primary);
+  outline-offset: -1px;
+}
+
+.owt-chats-toggle:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.owt-chats-toggle:disabled:hover {
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
 }
 
 /* Star button: quiet at rest unless pinned */

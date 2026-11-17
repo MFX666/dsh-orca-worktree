@@ -20,7 +20,6 @@ import type {
 } from '../protocol.ts'
 import type { WorktreeApi } from './api.ts'
 import {
-  IconChat,
   IconChevron,
   IconClose,
   IconDots,
@@ -211,6 +210,7 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
 
   const [overview, setOverview] = useState<WorktreeOverviewValue | null>(null)
   const [query, setQuery] = useState('')
+  const normalizedQuery = query.trim().toLowerCase()
   const [nowMs, setNowMs] = useState(() => Date.now())
   const [collapsedRepos, setCollapsedRepos] = useState<ReadonlySet<string>>(() => loadStoredSet(STORAGE_COLLAPSED_REPOS))
   const [collapsedLineage, setCollapsedLineage] = useState<ReadonlySet<string>>(() => loadStoredSet(STORAGE_COLLAPSED_LINEAGE))
@@ -579,6 +579,7 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
     storageKey: string,
     itemKey: string,
   ) => {
+    if (normalizedQuery !== '') return
     setter(prev => {
       const next = new Set(prev)
       if (next.has(itemKey)) next.delete(itemKey)
@@ -586,6 +587,28 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
       saveStoredSet(storageKey, next)
       return next
     })
+  }
+
+  const collapseAll = () => {
+    const repos = new Set([
+      ...collapsedRepos,
+      ...(overview?.repos ?? []).map(repo => repo.repositoryRoot),
+      ...workspaceSnap.items.map(ws => normalizePath(ws.path)),
+      'ungrouped',
+    ])
+    const lineage = new Set([
+      ...collapsedLineage,
+      ...(overview?.repos ?? []).flatMap(repo => repo.rows.map(row => normalizePath(row.path))),
+    ])
+    const chats = new Set<string>()
+    setQuery('')
+    setCollapsedRepos(repos)
+    setCollapsedLineage(lineage)
+    setExpandedChats(chats)
+    setExpandedChatLists(new Set())
+    saveStoredSet(STORAGE_COLLAPSED_REPOS, repos)
+    saveStoredSet(STORAGE_COLLAPSED_LINEAGE, lineage)
+    saveStoredSet(STORAGE_EXPANDED_CHATS, chats)
   }
 
   /** Click a worktree branch row: open its active/latest conversation, or start one inside it. */
@@ -596,7 +619,7 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
       const currentInRow = chats.find(c => c.id === activeSessionId)
       if (currentInRow !== undefined) {
         // Already viewing a chat in this worktree: toggle multi-chat drawer when >1 chat exists.
-        if (chats.length > 1) {
+        if (normalizedQuery === '' && chats.length > 1) {
           toggleSetItem(setExpandedChats, STORAGE_EXPANDED_CHATS, norm)
         }
         return
@@ -613,7 +636,7 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
         showToast('error', t('notice.error', { message: error instanceof Error ? error.message : String(error) }))
       }
     },
-    [activeSessionId, api, props, sessionsByPath, showToast, startSessionWhenReady, t],
+    [activeSessionId, api, normalizedQuery, props, sessionsByPath, showToast, startSessionWhenReady, t],
   )
 
   /** Start a brand-new conversation inside `row.path`. */
@@ -766,7 +789,6 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
     [sessionStateKind, sessionsByPath],
   )
 
-  const normalizedQuery = query.trim().toLowerCase()
 
   // Collapsed sidebar rail mode (56px column).
   if (!wide) {
@@ -848,7 +870,7 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
           ? chats.some(c => sessionLabel(c, t).toLowerCase().includes(normalizedQuery))
           : expandedChats.has(rowNorm)
       const status = worktreeStateKind(row.path)
-      const chatPreview = previewChats(chats, `wt:${rowNorm}`)
+      const chatPreview = normalizedQuery !== '' ? chats : previewChats(chats, `wt:${rowNorm}`)
 
       return (
         <div key={row.path} className="owt-wt-block">
@@ -879,6 +901,20 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
               })
             }}
           >
+            <button
+              type="button"
+              className="owt-icon-btn owt-chats-toggle"
+              disabled={chats.length === 0 || normalizedQuery !== ''}
+              aria-expanded={chats.length > 0 && chatsOpen}
+              aria-label={t(chatsOpen ? 'wt.collapseChats' : 'wt.expandChats')}
+              title={t(normalizedQuery !== '' ? 'wt.searchChatsHint' : chatsOpen ? 'wt.collapseChats' : 'wt.expandChats')}
+              onClick={event => {
+                event.stopPropagation()
+                toggleSetItem(setExpandedChats, STORAGE_EXPANDED_CHATS, rowNorm)
+              }}
+            >
+              <IconChevron open={chats.length > 0 && chatsOpen} size={12} />
+            </button>
             <span className="owt-git-icon" data-status={status} aria-hidden>
               {status === 'running' ? <span className="owt-loading" /> : <IconGitBranch size={13.5} />}
             </span>
@@ -893,20 +929,10 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
               </span>
             )}
 
-            {chats.length > 1 && (
-              <button
-                type="button"
-                className="owt-chat-pill"
-                aria-expanded={chatsOpen}
-                title={t('wt.chatsCount', { count: chats.length })}
-                onClick={event => {
-                  event.stopPropagation()
-                  toggleSetItem(setExpandedChats, STORAGE_EXPANDED_CHATS, rowNorm)
-                }}
-              >
-                <IconChat size={10.5} />
-                <span>{chats.length}</span>
-              </button>
+            {chats.length > 0 && (
+              <span className="owt-count-pill" title={t('wt.chatsCount', { count: chats.length })}>
+                {chats.length}
+              </span>
             )}
 
             {kids.length > 0 && (
@@ -1021,7 +1047,7 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
                   </div>
                 )
               })}
-              {chats.length > CHAT_PREVIEW_LIMIT && (
+              {normalizedQuery === '' && chats.length > CHAT_PREVIEW_LIMIT && (
                 <button
                   type="button"
                   className="owt-chats-more"
@@ -1058,6 +1084,14 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
           className="owt-repo-row"
           role="treeitem"
           aria-expanded={!repoCollapsed}
+          tabIndex={0}
+          onKeyDown={event => {
+            if (event.target !== event.currentTarget) return
+            if (event.key === 'Enter' || event.key === ' ') {
+              event.preventDefault()
+              toggleSetItem(setCollapsedRepos, STORAGE_COLLAPSED_REPOS, repo.repositoryRoot)
+            }
+          }}
           data-has-active={repoContainsActive ? 'true' : 'false'}
           title={repo.repositoryRoot}
           onClick={() => { toggleSetItem(setCollapsedRepos, STORAGE_COLLAPSED_REPOS, repo.repositoryRoot) }}
@@ -1179,6 +1213,7 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
     s => normalizedQuery === '' || sessionLabel(s, t).toLowerCase().includes(normalizedQuery),
   )
 
+  const ungroupedCollapsed = normalizedQuery === '' && collapsedRepos.has('ungrouped')
   const nothingShown =
     renderedRepos.length === 0 && filteredNonGit.length === 0 && filteredUngrouped.length === 0
 
@@ -1223,6 +1258,17 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
         <button
           type="button"
           className="owt-add-btn"
+          title={t('header.collapseAll')}
+          aria-label={t('header.collapseAll')}
+          onClick={collapseAll}
+        >
+          <svg viewBox="0 0 16 16" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={1.4} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+            <path d="M5.5 2.5h8v8M10.5 8v5.5h-8v-8H8M4.5 9.5h4" />
+          </svg>
+        </button>
+        <button
+          type="button"
+          className="owt-add-btn"
           title={t('header.addRepo')}
           aria-label={t('header.addRepo')}
           onClick={() => { void props.pickAndAddWorkspace() }}
@@ -1255,6 +1301,14 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
                 className="owt-repo-row"
                 role="treeitem"
                 aria-expanded={!collapsed}
+                tabIndex={0}
+                onKeyDown={event => {
+                  if (event.target !== event.currentTarget) return
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault()
+                    toggleSetItem(setCollapsedRepos, STORAGE_COLLAPSED_REPOS, norm)
+                  }
+                }}
                 data-missing={isMissing ? 'true' : 'false'}
                 data-has-active={folderHasActive ? 'true' : 'false'}
                 title={isMissing ? t('dialog.wsDelete.missingHint', { path: ws.path }) : ws.path}
@@ -1355,14 +1409,26 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
         {/* Ungrouped sessions fallback */}
         {filteredUngrouped.length > 0 && (
           <div className="owt-group">
-            <div className="owt-repo-row" role="treeitem">
+            <div
+              className="owt-repo-row"
+              role="treeitem"
+              aria-expanded={!ungroupedCollapsed}
+              tabIndex={0}
+              onClick={() => { toggleSetItem(setCollapsedRepos, STORAGE_COLLAPSED_REPOS, 'ungrouped') }}
+              onKeyDown={event => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault()
+                  toggleSetItem(setCollapsedRepos, STORAGE_COLLAPSED_REPOS, 'ungrouped')
+                }
+              }}
+            >
               <span className="owt-repo-chevron">
-                <IconChevron open size={12} />
+                <IconChevron open={!ungroupedCollapsed} size={12} />
               </span>
               <span className="owt-repo-name">{t('folder.ungrouped')}</span>
               <span className="owt-repo-count">{filteredUngrouped.length}</span>
             </div>
-            <div className="owt-repo-children" role="group">
+            {!ungroupedCollapsed && <div className="owt-repo-children" role="group">
               {(() => {
                 const ungroupedPreview = previewChats(filteredUngrouped, 'ungrouped')
                 const ungroupedExpanded = expandedChatLists.has('ungrouped')
@@ -1410,7 +1476,7 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
                   </>
                 )
               })()}
-            </div>
+            </div>}
           </div>
         )}
 
