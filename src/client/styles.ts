@@ -44,7 +44,7 @@ const CSS = `
   padding: 6px 0;
 }
 
-.owt-product-bar { display: flex; align-items: flex-end; gap: 6px; padding: 2px 6px 10px; flex: none; min-width: 0; }
+.owt-product-bar { display: flex; align-items: flex-end; gap: 6px; padding: 8px 6px 2px; flex: none; min-width: 0; }
 .owt-product-tabs { position: relative; display: flex; flex-wrap: wrap; align-content: flex-start; flex: 1; min-width: 0; max-height: 66px; overflow: hidden; gap: 6px; }
 .owt-product-tabs[data-expanded="true"] { max-height: min(30vh, 220px); overflow-y: auto; }
 .owt-product-tabs button, .owt-product-tabs [role="tab"], .owt-product-more { display: inline-flex; align-items: center; gap: 6px; flex: none; box-sizing: border-box; height: 30px; max-width: min(160px, 100%); min-width: 0; white-space: nowrap; border: 0; border-radius: 8px; padding: 5px 9px; background: var(--owt-hover-bg); color: var(--dsw-alias-label-secondary); font: inherit; font-size: 12px; cursor: pointer; }

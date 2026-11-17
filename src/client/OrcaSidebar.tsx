@@ -1364,65 +1364,6 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
 
   return (
     <div className="owt-root" ref={rootRef}>
-      <div className="owt-toolbar">
-        <div className="owt-search-wrap">
-          <span className="owt-search-icon">
-            <IconSearch size={13} />
-          </span>
-          <input
-            ref={searchInputRef}
-            type="text"
-            placeholder={t('header.search')}
-            aria-label={t('header.search')}
-            value={query}
-            onChange={event => { setQuery(event.target.value) }}
-            onKeyDown={event => {
-              if (event.key === 'Escape') {
-                setQuery('')
-                event.currentTarget.blur()
-              }
-            }}
-          />
-          {query !== '' ? (
-            <button
-              type="button"
-              className="owt-clear-btn"
-              aria-label={t('header.clearSearch')}
-              title={t('header.clearSearch')}
-              onClick={() => {
-                setQuery('')
-                searchInputRef.current?.focus()
-              }}
-            >
-              <IconClose size={11} />
-            </button>
-          ) : (
-            <span className="owt-kbd-hint" aria-hidden>{shortcutBadge}</span>
-          )}
-        </div>
-        <button
-          type="button"
-          className="owt-add-btn"
-          title={t('header.collapseAll')}
-          aria-label={t('header.collapseAll')}
-          onClick={collapseAll}
-        >
-          <svg viewBox="0 0 16 16" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={1.4} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-            <path d="M5.5 2.5h8v8M10.5 8v5.5h-8v-8H8M4.5 9.5h4" />
-          </svg>
-        </button>
-        <button
-          type="button"
-          className="owt-add-btn"
-          title={t(productId === undefined ? 'header.addRepo' : 'product.addWorkspace')}
-          aria-label={t(productId === undefined ? 'header.addRepo' : 'product.addWorkspace')}
-          onClick={() => {
-            void props.pickAndAddWorkspace(productId).catch(error => { showToast('error', error instanceof Error ? error.message : String(error)) })
-          }}
-        >
-          <IconPlus size={14} />
-        </button>
-      </div>
       <div className="owt-product-bar">
         <div ref={productTabsRef} className="owt-product-tabs" role="tablist" aria-label={t('product.workspaces')}
           data-expanded={showAllProducts ? 'true' : undefined}
@@ -1485,6 +1426,65 @@ export function OrcaSidebar(props: OrcaSidebarProps): ReactElement {
           onClick={() => { setProductsExpanded(current => !current) }}>{t(showAllProducts ? 'product.less' : 'product.more')}<IconChevron open={showAllProducts} size={10} /></button>}
         <button type="button" className="owt-add-btn" title={t('product.add')} aria-label={t('product.add')} onClick={() => { setProductDialog('new') }}><IconPlus size={14} /></button>
         {selectedProduct && <button type="button" className="owt-add-btn" title={t('product.edit')} aria-label={t('product.edit')} onClick={() => { setProductDialog('edit') }}><IconDots size={14} /></button>}
+      </div>
+      <div className="owt-toolbar">
+        <div className="owt-search-wrap">
+          <span className="owt-search-icon">
+            <IconSearch size={13} />
+          </span>
+          <input
+            ref={searchInputRef}
+            type="text"
+            placeholder={t('header.search')}
+            aria-label={t('header.search')}
+            value={query}
+            onChange={event => { setQuery(event.target.value) }}
+            onKeyDown={event => {
+              if (event.key === 'Escape') {
+                setQuery('')
+                event.currentTarget.blur()
+              }
+            }}
+          />
+          {query !== '' ? (
+            <button
+              type="button"
+              className="owt-clear-btn"
+              aria-label={t('header.clearSearch')}
+              title={t('header.clearSearch')}
+              onClick={() => {
+                setQuery('')
+                searchInputRef.current?.focus()
+              }}
+            >
+              <IconClose size={11} />
+            </button>
+          ) : (
+            <span className="owt-kbd-hint" aria-hidden>{shortcutBadge}</span>
+          )}
+        </div>
+        <button
+          type="button"
+          className="owt-add-btn"
+          title={t('header.collapseAll')}
+          aria-label={t('header.collapseAll')}
+          onClick={collapseAll}
+        >
+          <svg viewBox="0 0 16 16" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={1.4} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+            <path d="M5.5 2.5h8v8M10.5 8v5.5h-8v-8H8M4.5 9.5h4" />
+          </svg>
+        </button>
+        <button
+          type="button"
+          className="owt-add-btn"
+          title={t(productId === undefined ? 'header.addRepo' : 'product.addWorkspace')}
+          aria-label={t(productId === undefined ? 'header.addRepo' : 'product.addWorkspace')}
+          onClick={() => {
+            void props.pickAndAddWorkspace(productId).catch(error => { showToast('error', error instanceof Error ? error.message : String(error)) })
+          }}
+        >
+          <IconPlus size={14} />
+        </button>
       </div>
       {(productError || selectedProduct?.error) && <div className="owt-toast" data-kind="error" role="alert">{productError || selectedProduct?.error}</div>}
       {productDialog !== null && <ProductDialog
